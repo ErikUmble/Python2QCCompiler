@@ -1,0 +1,8 @@
+qiskit
+qiskit_ibm_runtime
+matplotlib
+pylatexenc
+ipykernel
+python-dotenv
+qiskit_aer
+tweedledum  # requires 3.6 <= python <= 3.11
