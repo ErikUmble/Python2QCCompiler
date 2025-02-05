@@ -2,7 +2,10 @@ import random
 
 operators = ("and", "or", "not", "^")
 
-def random_statement(num_vars, complexity, hop_limit=50, best_statement="", best_variable_count=0):
+def get_variables(num_vars):
+    return ["x" + str(i) for i in range(num_vars)]
+
+def get_random_statement(num_vars, complexity, hop_limit=50, best_statement="", best_variable_count=0):
     global num_errors
     if num_vars < 2:
         raise ValueError("num_vars must be at least 2")
@@ -10,7 +13,7 @@ def random_statement(num_vars, complexity, hop_limit=50, best_statement="", best
     if complexity < 1:
         raise ValueError("complexity must be at least 1")
 
-    variables = ["x" + str(i) for i in range(num_vars)]
+    variables = get_variables(num_vars)
     statements = list(variables)
 
     statement = random.choice(statements)
@@ -44,10 +47,10 @@ def random_statement(num_vars, complexity, hop_limit=50, best_statement="", best
         best_statement = statement
 
     if hop_limit == 0:
-        print(f"Warning: statement ({num_vars},{complexity}) only uses {best_variable_count} variables; skipping")
-        return None, None
+        print(f"Warning: statement ({num_vars},{complexity}) only uses {best_variable_count} variables")
+        return best_statement, variables
     
-    return random_statement(num_vars, complexity, hop_limit - 1, best_statement, best_variable_count)
+    return get_random_statement(num_vars, complexity, hop_limit - 1, best_statement, best_variable_count)
 
 def get_classical_function(statement, variables, name="f"):
     return f"""
@@ -70,7 +73,7 @@ def generate_benchmark_functions(filename="benchmark_functions.py"):
         index = {}
         for num_vars in range(2, 20):
             for complexity in range(num_vars - 1, num_vars + 15):
-                statement, variables = random_statement(num_vars, complexity)
+                statement, variables = get_random_statement(num_vars, complexity)
                 if statement is None:
                     continue
                 f.write(get_classical_function(statement, variables, name=f"cf_v{num_vars}_c{complexity}"))
