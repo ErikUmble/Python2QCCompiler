@@ -243,7 +243,9 @@ def run_benchmark_sample(num_vars, complexity, num_functions=100, num_inputs=100
     """
     trials = Trials()
     if include_existing_trials:
-        existing_trials = trials.get(num_vars, complexity)
+        # count the number of distinct statements we already have trials for
+        # this could be optimized with a direct SQL query, but it's probably fine like this too
+        existing_trials = set([t.statement for t in trials.get(num_vars, complexity)])
         num_functions -= len(existing_trials)
 
     new_trials = []
