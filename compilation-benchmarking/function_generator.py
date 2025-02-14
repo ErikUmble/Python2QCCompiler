@@ -5,7 +5,35 @@ operators = ("and", "or", "not", "^")
 def get_variables(num_vars):
     return ["x" + str(i) for i in range(num_vars)]
 
-def get_random_statement(num_vars, complexity, hop_limit=50, best_statement="", best_variable_count=0):
+def get_random_statement(num_vars, complexity):
+    if num_vars < 2:
+        raise ValueError("num_vars must be at least 2")
+
+    if complexity < 1:
+        raise ValueError("complexity must be at least 1")
+
+    variables = get_variables(num_vars)
+    statements = list(variables)
+
+    for i in range(complexity):
+        next_complexity_statements = []
+
+        for _ in range(num_vars):
+
+            operator = random.choice(operators)
+            s1 = random.choice(statements[-num_vars:])  # ensure s1 has complexity i
+            s2 = random.choice(statements)              # s2 can have any complexity <= i
+        
+            if operator == "not":
+                next_complexity_statements.append(f"not ({s1})")
+            else:
+                next_complexity_statements.append(f"({s1}) {operator} ({s2})")
+
+        statements += next_complexity_statements
+
+    return statements[-1], variables
+
+def get_random_statement_old(num_vars, complexity, hop_limit=50, best_statement="", best_variable_count=0):
     global num_errors
     if num_vars < 2:
         raise ValueError("num_vars must be at least 2")
@@ -50,7 +78,8 @@ def get_random_statement(num_vars, complexity, hop_limit=50, best_statement="", 
         print(f"Warning: statement ({num_vars},{complexity}) only uses {best_variable_count} variables")
         return best_statement, variables
     
-    return get_random_statement(num_vars, complexity, hop_limit - 1, best_statement, best_variable_count)
+    return get_random_statement_old(num_vars, complexity, hop_limit - 1, best_statement, best_variable_count)
+
 
 def get_classical_function(statement, variables, name="f"):
     return f"""

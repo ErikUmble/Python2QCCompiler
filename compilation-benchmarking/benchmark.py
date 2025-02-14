@@ -17,6 +17,20 @@ API_TOKEN = os.getenv("API_TOKEN")
 service = QiskitRuntimeService(channel="ibm_quantum", token=API_TOKEN)
 backend = service.backend(name="ibm_rensselaer")
 
+DEBUG = os.getenv("DEBUG", False)
+
+def debug_print(*args, **kwargs):
+    if DEBUG:
+        print(*args, **kwargs)
+
+def hamming_distance(a, b):
+    """
+    returns the hamming distance between two binary strings
+    the strings must be the same length
+    """
+    assert len(a) == len(b)
+    return sum([1 for i in range(len(a)) if a[i] != b[i]])
+
 class Trial:
     def __init__(self, num_vars, complexity, job_id, job_pub_idx, input_state, statement, counts=None, trial_id=None):
         self.trial_id = trial_id
@@ -38,6 +52,29 @@ class Trial:
         for i, var in enumerate(self.variables):
             input_variables[var] = int(self.input_state[i])
         return eval(self.statement, {}, input_variables)
+    
+    @property
+    def exact_match_rate(self):
+        if self.counts is None:
+            raise ValueError("Counts must be set before calculating exact match rate. Use get_counts() or get_counts_async() to update the counts.")
+        
+        successes = self.counts.get(self.total_expected_results(), 0)
+        return successes / sum(self.counts.values())
+    
+    @property
+    def mean_hamming_distance(self):
+        """
+        the mean hamming distance between the expected result and the measured results per shot, per qubit
+        """
+        if self.counts is None:
+            raise ValueError("Counts must be set before calculating mean hamming distance. Use get_counts() or get_counts_async() to update the counts.")
+        
+        total_distance = 0
+        expected = self.total_expected_results()
+        for result, count in self.counts.items():
+            total_distance += hamming_distance(expected, result) * count
+
+        return total_distance / sum(self.counts.values())
 
     def as_dict(self):
         return {
@@ -192,18 +229,41 @@ class Trials:
             cursor.execute(query, params)
             return self._as_trials(cursor.fetchall())
         
+    
+    def _use_job_results(self, job_id, results):
+        """
+        Given a job_id and the results of the job, this updates the counts for all trials with that job_id
+        """
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM trials WHERE job_id = ? AND counts = ''", (job_id,))
+            trials = self._as_trials(cursor.fetchall())
+            for trial in trials:
+                trial.counts = results[trial.job_pub_idx].data.meas.get_counts()
+                self.save(trial)
+
+    async def use_job_results(self, job_id):
+        """
+        Given a job_id, this fetches the results of the job and updates the counts for all trials with that job_id
+        """
+        retrieved_job = await asyncio.to_thread(service.job, job_id)
+        results = await asyncio.to_thread(retrieved_job.result)
+        self._use_job_results(job_id, results)
+    
     async def load_results(self):
         """
         Loads counts results for all trials that do not yet have them, saving the the updated trials to the database
         """
-        query = "SELECT * FROM trials WHERE counts = ''"
-        trials = []
+        query = "SELECT DISTINCT job_id FROM trials WHERE counts = ''"
+        jobs = []
         with self._connect() as conn:
             cursor = conn.cursor()
             cursor.execute(query)
-            trials = self._as_trials(cursor.fetchall())
-        tasks = [t.get_counts_async(trials=self) for t in trials]
-        await asyncio.gather(*tasks)
+            jobs = cursor.fetchall()
+        
+        # we could try to parallelize this, but this at least conserves memory
+        for job in jobs:
+            await self.use_job_results(job[0])
 
 
 def get_oracle(statement, variables):
@@ -241,6 +301,8 @@ def run_benchmark_sample(num_vars, complexity, num_functions=100, num_inputs=100
     Note: this does not wait for the quantum jobs to complete, but does the trials' metadata to the database. Call Trials().load_results() to update
     the database with the results of the jobs.
     """
+    debug_print(f"Running benchmark sample for {num_vars} variables and complexity {complexity}")
+
     trials = Trials()
     if include_existing_trials:
         # count the number of distinct statements we already have trials for
@@ -253,7 +315,7 @@ def run_benchmark_sample(num_vars, complexity, num_functions=100, num_inputs=100
         statement, variables = get_random_statement(num_vars, complexity)
         if statement is None:
             continue
-
+        debug_print(f"Compiling statement: {statement}")
         oracle = get_oracle(statement, variables)
         circuits = []
         trials_batch = []
@@ -273,6 +335,7 @@ def run_benchmark_sample(num_vars, complexity, num_functions=100, num_inputs=100
             # use job_id as None for now, we will update this once the job is run
             trials_batch.append(Trial(num_vars, complexity, None, job_pub_idx, ''.join(map(str, inpt)), statement, None))
 
+        debug_print(f"Submitting batch of {num_inputs} circuits to backend")
         # run batch job of the oracle on each input
         sampler = Sampler(backend)
         job = sampler.run(circuits, shots=shots)
