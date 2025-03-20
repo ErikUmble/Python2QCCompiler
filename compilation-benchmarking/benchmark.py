@@ -7,14 +7,14 @@ import os
 import sqlite3
 import tempfile
 import qiskit
-from qiskit_ibm_runtime import QiskitRuntimeService
-from qiskit_ibm_runtime import SamplerV2 as Sampler
+from qiskit_ibm_runtime import QiskitRuntimeService, Batch, SamplerV2 as Sampler
 
 from function_generator import get_variables, get_python_function, get_classical_function, get_random_statement
 
 load_dotenv()
 API_TOKEN = os.getenv("API_TOKEN")
-service = QiskitRuntimeService(channel="ibm_quantum", token=API_TOKEN)
+API_INSTANCE = os.getenv("API_INSTANCE", None)
+service = QiskitRuntimeService(channel="ibm_quantum", token=API_TOKEN, instance=API_INSTANCE)
 backend = service.backend(name="ibm_rensselaer")
 
 DEBUG = os.getenv("DEBUG", False)
@@ -185,7 +185,7 @@ class Trials:
                     "INSERT INTO trials (num_vars, complexity, statement, input_state, job_id, job_pub_idx, counts) VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (num_vars, complexity, statement, input_state, job_id, job_pub_idx, counts)
                 )
-                trial_id = cursor.lastrowid
+                trial.trial_id = cursor.lastrowid
             else:
                 cursor.execute(
                     "UPDATE trials SET num_vars = ?, complexity = ?, statement = ?, input_state = ?, job_id = ?, job_pub_idx = ?, counts = ? WHERE id = ?",
@@ -212,7 +212,7 @@ class Trials:
             cursor.execute("SELECT * FROM trials")
             return self._as_trials(cursor.fetchall())
         
-    def get(self, num_vars, complexity, statement=None, input_state=None):
+    def get(self, num_vars, complexity, statement=None, input_state=None, include_pending=False):
         query = "SELECT * FROM trials WHERE num_vars = ? AND complexity = ?"
         params = [num_vars, complexity]
         
@@ -223,12 +223,22 @@ class Trials:
         if input_state is not None:
             query += " AND input_state = ?"
             params.append(input_state)
+
+        if not include_pending:
+            query += " AND NOT counts = ''"
         
         with self._connect() as conn:
             cursor = conn.cursor()
             cursor.execute(query, params)
             return self._as_trials(cursor.fetchall())
         
+    
+    def get_per_statement(self, num_vars, complexity):
+        with self._connect() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT DISTINCT statement FROM trials WHERE num_vars = ? AND complexity = ? AND NOT counts = ''", (num_vars, complexity))
+            statements = cursor.fetchall()
+            return {statement[0]: self.get(num_vars, complexity, statement=statement[0]) for statement in statements}
     
     def _use_job_results(self, job_id, results):
         """
@@ -247,7 +257,11 @@ class Trials:
         Given a job_id, this fetches the results of the job and updates the counts for all trials with that job_id
         """
         retrieved_job = await asyncio.to_thread(service.job, job_id)
-        results = await asyncio.to_thread(retrieved_job.result)
+        try:
+            results = await asyncio.to_thread(retrieved_job.result)
+        except Exception as e:
+            print(f"Error fetching results for job {job_id}: {e}")
+            return
         self._use_job_results(job_id, results)
     
     async def load_results(self):
@@ -310,42 +324,48 @@ def run_benchmark_sample(num_vars, complexity, num_functions=100, num_inputs=100
         existing_trials = set([t.statement for t in trials.get(num_vars, complexity)])
         num_functions -= len(existing_trials)
 
+    if num_functions <= 0:
+        return []
+
     new_trials = []
-    for _ in range(num_functions):
-        statement, variables = get_random_statement(num_vars, complexity)
-        if statement is None:
-            continue
-        debug_print(f"Compiling statement: {statement}")
-        oracle = get_oracle(statement, variables)
-        circuits = []
-        trials_batch = []
-        for _ in range(num_inputs):
-            qc = qiskit.QuantumCircuit(num_vars + 1) # +1 for result qubit
-            inpt = [random.randint(0, 1) for _ in range(num_vars)]
-            for i, bit in enumerate(inpt):
-                if bit:
-                    qc.x(qc.qubits[i])
+    with Batch(backend,) as batch:
+        sampler = Sampler() # backend and mode=batch are implicit inside context manager
 
-            qc.compose(oracle, inplace=True)
-            qc.measure_all()
-            qc_transpiled = qiskit.transpile(qc, backend=backend)
-            job_pub_idx = len(circuits)
-            circuits.append(qc_transpiled)
+        for batch_job_idx in range(num_functions):
+            statement, variables = get_random_statement(num_vars, complexity)
+            if statement is None:
+                continue
+            debug_print(f"Compiling statement: {statement}")
+            oracle = get_oracle(statement, variables)
+            circuits = []
+            trials_minibatch = []
+            for _ in range(num_inputs):
+                qc = qiskit.QuantumCircuit(num_vars + 1) # +1 for result qubit
+                inpt = [random.randint(0, 1) for _ in range(num_vars)]
+                for i, bit in enumerate(inpt):
+                    if bit:
+                        qc.x(qc.qubits[i])
 
-            # use job_id as None for now, we will update this once the job is run
-            trials_batch.append(Trial(num_vars, complexity, None, job_pub_idx, ''.join(map(str, inpt)), statement, None))
+                qc.compose(oracle, inplace=True)
+                qc.measure_all()
+                qc_transpiled = qiskit.transpile(qc, backend=backend)
+                job_pub_idx = len(circuits)
+                circuits.append(qc_transpiled)
 
-        debug_print(f"Submitting batch of {num_inputs} circuits to backend")
-        # run batch job of the oracle on each input
-        sampler = Sampler(backend)
-        job = sampler.run(circuits, shots=shots)
-        job_id = job.job_id()
+                # use job_id as None for now, we will update this once the job is run
+                trials_minibatch.append(Trial(num_vars, complexity, None, job_pub_idx, ''.join(map(str, inpt)), statement, None))
 
-        # save the trials
-        for trial in trials_batch:
-            trial.job_id = job_id
-            trials.save(trial)
-            new_trials.append(trial)
+            debug_print(f"Submitting minibatch of {num_inputs} circuits to backend. Job {batch_job_idx} of batch.")
+            
+            # run batch job of the oracle on each input
+            job = sampler.run(circuits, shots=shots)
+            job_id = job.job_id()
+
+            # save the trials
+            for trial in trials_minibatch:
+                trial.job_id = job_id
+                trials.save(trial)
+                new_trials.append(trial)
 
     return new_trials
     
