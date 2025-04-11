@@ -106,7 +106,7 @@ class Graph:
         self._clique_counts = clique_counts
         return clique_counts
 
-class GraphDB:
+class Graphs:
     def __init__(self, db_name="graphs.db"):
         self.db_name = db_name
         self._initialize_database()
@@ -214,7 +214,7 @@ def get_random_graph(n, p):
     return Graph(g, p=p)
 
 def generate_database(n_range, p_range, num_graphs, compute_clique_counts=False, db_name="graphs.db", include_existing=True):
-    graphs = GraphDB(db_name)
+    graphs = Graphs(db_name)
     for n in n_range:
         for p in p_range:
             num_existing = len(graphs.get(n=n, p=p)) if include_existing else 0

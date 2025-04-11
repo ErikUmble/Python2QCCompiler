@@ -7,7 +7,7 @@ import os
 import sqlite3
 import tempfile
 import qiskit
-from qiskit_ibm_runtime import QiskitRuntimeService, Batch, SamplerV2 as Sampler
+from qiskit_ibm_runtime import QiskitRuntimeService, Batch, SamplerV2 as Sampler, IBMRuntimeError
 
 from function_generator import get_variables, get_python_function, get_classical_function, get_random_statement
 
@@ -75,6 +75,11 @@ class Trial:
             total_distance += hamming_distance(expected, result) * count
 
         return total_distance / sum(self.counts.values())
+    
+    def mark_failure(self):
+        if self.counts is not None:
+            raise Exception("Cannot mark failure if counts are already set")
+        self.counts = {"-1":1}
 
     def as_dict(self):
         return {
@@ -212,17 +217,32 @@ class Trials:
             cursor.execute("SELECT * FROM trials")
             return self._as_trials(cursor.fetchall())
         
-    def get(self, num_vars, complexity, statement=None, input_state=None, include_pending=False):
-        query = "SELECT * FROM trials WHERE num_vars = ? AND complexity = ?"
-        params = [num_vars, complexity]
+    def get(self, num_vars=None, complexity=None, statement=None, input_state=None, job_id=None, include_pending=False):
+        
+        params = []
+        query_parts = []
+
+        if num_vars is not None:
+            query_parts.append("num_vars = ?")
+            params.append(num_vars)
+
+        if complexity is not None:
+            query_parts.append("complexity = ?")
+            params.append(complexity)
         
         if statement is not None:
-            query += " AND statement = ?"
+            query_parts.append("statement = ?")
             params.append(statement)
         
         if input_state is not None:
-            query += " AND input_state = ?"
+            query_parts.append("input_state = ?")
             params.append(input_state)
+
+        if job_id is not None:
+            query_parts.append("job_id = ?")
+            params.append(job_id)
+
+        query = "SELECT * FROM trials WHERE " + " AND ".join(query_parts)
 
         if not include_pending:
             query += " AND NOT counts = ''"
@@ -304,13 +324,15 @@ from qiskit.circuit.classicalfunction.types import Int1
 
         return oracle
 
-def run_benchmark_sample(num_vars, complexity, num_functions=100, num_inputs=100, shots=10**4, include_existing_trials=False):
+def run_benchmark_sample(num_vars, complexity, num_functions=100, num_inputs=100, shots=10**4, include_existing_trials=False, circuits_per_job=100):
     """
     Given a number of variables and complexity, this generates num_function random functions of that number of variables and complexity,
     compiles each into a quantum circuit, and runs the circuit on num_inputs random inputs.
     If include_existing_trials is True, this will only generate enough trials to bring the current count up to the specified amounts.
     For instance, if there are already trials for 20 functions with the given num_vars and complexity, this will only generate trials for 80 more.
     Returns a list of the new Trial objects created for this sample.
+    circuits_per_job specifies the maximum number of circuits to submit to a single job, if greater than or equal to num_inputs, then there will 
+    be a single job per function, if less then there will be multiple jobs per function.
 
     Note: this does not wait for the quantum jobs to complete, but does the trials' metadata to the database. Call Trials().load_results() to update
     the database with the results of the jobs.
@@ -321,51 +343,84 @@ def run_benchmark_sample(num_vars, complexity, num_functions=100, num_inputs=100
     if include_existing_trials:
         # count the number of distinct statements we already have trials for
         # this could be optimized with a direct SQL query, but it's probably fine like this too
-        existing_trials = set([t.statement for t in trials.get(num_vars, complexity)])
+        existing_trials = set([t.statement for t in trials.get(num_vars, complexity, include_pending=True)])
         num_functions -= len(existing_trials)
-
+        
+    debug_print(f"Number of existing trials: {len(existing_trials)}")
     if num_functions <= 0:
         return []
 
     new_trials = []
     with Batch(backend,) as batch:
         sampler = Sampler() # backend and mode=batch are implicit inside context manager
-
+        debug_print("here")
         for batch_job_idx in range(num_functions):
             statement, variables = get_random_statement(num_vars, complexity)
             if statement is None:
                 continue
             debug_print(f"Compiling statement: {statement}")
             oracle = get_oracle(statement, variables)
-            circuits = []
-            trials_minibatch = []
-            for _ in range(num_inputs):
-                qc = qiskit.QuantumCircuit(num_vars + 1) # +1 for result qubit
-                inpt = [random.randint(0, 1) for _ in range(num_vars)]
-                for i, bit in enumerate(inpt):
-                    if bit:
-                        qc.x(qc.qubits[i])
+            circuits_remaining = num_inputs
+            while circuits_remaining > 0:
+                circuits = []
+                trials_minibatch = []
+                for _ in range(min(circuits_per_job, circuits_remaining)):
+                    qc = qiskit.QuantumCircuit(num_vars + 1) # +1 for result qubit
+                    inpt = [random.randint(0, 1) for _ in range(num_vars)]
+                    for i, bit in enumerate(inpt):
+                        if bit:
+                            qc.x(qc.qubits[i])
 
-                qc.compose(oracle, inplace=True)
-                qc.measure_all()
-                qc_transpiled = qiskit.transpile(qc, backend=backend)
-                job_pub_idx = len(circuits)
-                circuits.append(qc_transpiled)
+                    qc.compose(oracle, inplace=True)
+                    qc.measure_all()
+                    qc_transpiled = qiskit.transpile(qc, backend=backend)
+                    job_pub_idx = len(circuits)
+                    circuits.append(qc_transpiled)
 
-                # use job_id as None for now, we will update this once the job is run
-                trials_minibatch.append(Trial(num_vars, complexity, None, job_pub_idx, ''.join(map(str, inpt)), statement, None))
+                    # use job_id as None for now, we will update this once the job is run
+                    trials_minibatch.append(Trial(num_vars, complexity, None, job_pub_idx, ''.join(map(str, inpt)), statement, None))
 
-            debug_print(f"Submitting minibatch of {num_inputs} circuits to backend. Job {batch_job_idx} of batch.")
-            
-            # run batch job of the oracle on each input
-            job = sampler.run(circuits, shots=shots)
-            job_id = job.job_id()
+                debug_print(f"Submitting minibatch of {min(circuits_per_job, circuits_remaining)} circuits to backend. Job {batch_job_idx} of batch.")
+                circuits_remaining -= circuits_per_job
+                
+                # run batch job of the oracle on each input
+                try:
+                    job = sampler.run(circuits, shots=shots)
+                    job_id = job.job_id()
+                    # save the trials
+                    for trial in trials_minibatch:
+                        trial.job_id = job_id
+                        trials.save(trial)
+                        new_trials.append(trial)
 
-            # save the trials
-            for trial in trials_minibatch:
-                trial.job_id = job_id
-                trials.save(trial)
-                new_trials.append(trial)
+                except IBMRuntimeError as e:
+                    print(e)
+                    # if payload is too large, try sending circuits as separate jobs
+                    try:
+                        for circuit, trial in zip(circuits, trials_minibatch):
+                            job = sampler.run([circuit], shots=shots)
+                            job_id = job.job_id()
+                            print("submitting single job with id: ", job_id)
+                            trial.job_id = job_id
+                            trial.job_pub_idx = 0
+                            trials.save(trial)
+                            new_trials.append(trial)
+                    except IBMRuntimeError as e:
+                        print("unable to submit job, skipping: ", e)
 
     return new_trials
     
+
+def mark_job_failure(job_id):
+    trials = Trials()
+    for trial in trials.get(job_id=job_id):
+        trial.mark_failure()
+        trials.save(trial)
+        
+def create_compilation_failure_trial(num_vars, complexity, statement, trials=None):
+    trial = Trial(num_vars=num_vars, complexity=complexity, job_id="_compilation_failed_", job_pub_idx=0, statement=statement)
+    trial.mark_failure()
+    if trials is not None:
+        trials.save(trial)
+
+    return trial
