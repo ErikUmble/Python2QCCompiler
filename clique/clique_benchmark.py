@@ -435,7 +435,7 @@ def _clique_size_to_search_for(graph: Graph, target_grover_iterations: int):
 def clique_oracle_compiler_classical_function(graph: str, clique_size):
     return _classical_function_to_oracle(construct_clique_verifier(graph, as_classical_function=True, clique_size=clique_size))
 
-def run_benchmark_sample(graph : Graph, compile_type, clique_oracle_compiler, grover_iterations, shots=10**4, include_existing_trials=False):
+def run_benchmark_sample(graph : Graph, compile_type, clique_oracle_compiler, clique_size, grover_iterations, shots=10**4, include_existing_trials=False):
     """
     Given a number of variables and complexity, this generates num_function random functions of that number of variables and complexity,
     compiles each into a quantum circuit, and runs the circuit on num_inputs random inputs.
@@ -456,15 +456,14 @@ def run_benchmark_sample(graph : Graph, compile_type, clique_oracle_compiler, gr
         if len(trials.get(graph_id=graph.graph_id, grover_iterations=grover_iterations, include_pending=True)) > 0:
             return
         
-    target_clique_size = _clique_size_to_search_for(graph, grover_iterations)
-    clique_oracle = clique_oracle_compiler(graph.g, target_clique_size)
-    debug_print(f"Looking for a clique with {target_clique_size} vertices")
-    job_id, simulation_counts = run_grover(clique_oracle, graph.n, graph.clique_counts[target_clique_size], shots=shots)
+    clique_oracle = clique_oracle_compiler(graph.g, clique_size)
+    debug_print(f"Looking for a clique with {clique_size} vertices")
+    job_id, simulation_counts = run_grover(clique_oracle, graph.n, graph.clique_counts[clique_size], shots=shots)
         
     trial = Trial(
         graph_id=graph.graph_id,
         compile_type=compile_type,
-        clique_size=target_clique_size,
+        clique_size=clique_size,
         grover_iterations=grover_iterations,
         job_id=job_id,
         job_pub_idx=0,
