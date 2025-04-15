@@ -123,7 +123,7 @@ class Trial:
 
 
 class Trials:
-    def __init__(self, db_name="graph.db"):
+    def __init__(self, db_name="graphs.db"):
         self.db_name = db_name
         self._initialize_database()
 
@@ -210,15 +210,15 @@ class Trials:
             cursor.execute("SELECT * FROM clique_trials")
             return self._as_trials(cursor.fetchall())
         
-    def get(self, graph_id=None, compile_type=None, clique_size=None, grover_iterations=None, job_id=None, include_pending=False):
+    def get(self, graph_id=None, graph=None, compile_type=None, clique_size=None, grover_iterations=None, job_id=None, include_pending=False):
         
         params = []
         query_parts = []
 
         if graph_id is not None:
             query_parts.append("graph_id = ?")
-            params.append(graph_id)
-
+            params.append(graph_id)            
+            
         if compile_type is not None:
             query_parts.append("compile_type = ?")
             params.append(compile_type)
@@ -235,10 +235,23 @@ class Trials:
             query_parts.append("job_id = ?")
             params.append(job_id)
 
-        query = "SELECT * FROM clique_trials WHERE " + " AND ".join(query_parts)
-
         if not include_pending:
-            query += " AND NOT counts = ''"
+            query_parts.append("NOT counts = ?")
+            params.append("")
+
+        if graph is None:
+            query = "SELECT * FROM clique_trials WHERE " + " AND ".join(query_parts)
+
+        else:
+            # we need a join with graphs table
+            if isinstance(graph, Graph):
+                graph = graph.g
+            params.append(graph)
+
+            if len(query_parts) > 0:
+                query = "SELECT clique_trials.* FROM clique_trials JOIN graphs ON clique_trials.graph_id = graphs.id WHERE " + " AND ".join(query_parts) + " AND graphs.g = ?"
+            else:
+                query = "SELECT clique_trials.* FROM clique_trials JOIN graphs ON clique_trials.graph_id = graphs.id WHERE graphs.g = ?"
         
         with self._connect() as conn:
             cursor = conn.cursor()
@@ -450,7 +463,7 @@ def run_benchmark_sample(graph : Graph, compile_type, clique_oracle, clique_size
     trials = Trials()
     
     if include_existing_trials:
-        if len(trials.get(graph_id=graph.graph_id, clique_size=clique_size, grover_iterations=grover_iterations, include_pending=True)) > 0:
+        if len(trials.get(graph=graph, clique_size=clique_size, grover_iterations=grover_iterations, include_pending=True)) > 0:
             return
         
     debug_print(f"Looking for a clique with {clique_size} vertices using {grover_iterations} iterations")
