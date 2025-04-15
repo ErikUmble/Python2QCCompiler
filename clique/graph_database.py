@@ -3,6 +3,7 @@ import json
 import numpy as np
 import random
 import sqlite3
+import math
 
 """
 Graph Schema:
@@ -105,6 +106,21 @@ class Graph:
 
         self._clique_counts = clique_counts
         return clique_counts
+
+    def optimal_grover_iterations(self, clique_size):
+        """
+        Given a clique size, return the optimal number of Grover iterations to find a clique of at least that size
+        """
+        if clique_size <= 0 or clique_size > self.n:
+            raise ValueError("Invalid clique size")
+        
+        m = self.clique_counts[clique_size]
+        if m == 0:
+            raise Exception(f"No cliques of size {clique_size}")
+
+        return math.floor(
+            math.pi / (4 * math.asin(math.sqrt(m / 2 ** self.n)))
+        )
 
 class Graphs:
     def __init__(self, db_name="graphs.db"):

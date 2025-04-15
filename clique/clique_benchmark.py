@@ -28,7 +28,7 @@ DEBUG = os.getenv("DEBUG", False)
 class CompileType:
     DIRECT = "DIRECT"
     CLASSICAL_FUNCTION = "CLASSICAL_FUNCTION"
-    GRAPH_OPTIMIZE = "GRAPH_OPTIMIZE"
+    XAG = "XAG"
 
 def debug_print(*args, **kwargs):
     if DEBUG:
@@ -385,7 +385,8 @@ from qiskit.circuit.classicalfunction.types import Int1
         return oracle
 
 
-def run_grover(oracle, n, m, shots=10**4):
+
+def run_grover(oracle, n, grover_iterations, shots=10**4):
     """ 
     Given oracle U_f that has m solutions, this runs a Grover's search circuit using U_f
     and returns the job_id, simulation_counts of the job that was submitted to the backend.
@@ -393,10 +394,6 @@ def run_grover(oracle, n, m, shots=10**4):
     assert oracle.num_qubits in [n, n+1]
     uf_mode = oracle.num_qubits == n+1
     grover_op = grover_operator(oracle, reflection_qubits=range(n))
-
-    optimal_num_iterations = math.floor(
-        math.pi / (4 * math.asin(math.sqrt(m / 2**n)))
-    )
     
     search_circuit = qiskit.QuantumCircuit(oracle.num_qubits, n)
 
@@ -406,7 +403,7 @@ def run_grover(oracle, n, m, shots=10**4):
         search_circuit.h(n)
 
     search_circuit.h(range(n))
-    search_circuit.compose(grover_op.power(optimal_num_iterations), inplace=True)
+    search_circuit.compose(grover_op.power(grover_iterations), inplace=True)
     search_circuit.measure(range(n), range(n))
 
     qc = qiskit.transpile(search_circuit, backend)
@@ -435,7 +432,7 @@ def _clique_size_to_search_for(graph: Graph, target_grover_iterations: int):
 def clique_oracle_compiler_classical_function(graph: str, clique_size):
     return _classical_function_to_oracle(construct_clique_verifier(graph, as_classical_function=True, clique_size=clique_size))
 
-def run_benchmark_sample(graph : Graph, compile_type, clique_oracle_compiler, clique_size, grover_iterations, shots=10**4, include_existing_trials=False):
+def run_benchmark_sample(graph : Graph, compile_type, clique_oracle, clique_size, grover_iterations, shots=10**4, include_existing_trials=False):
     """
     Given a number of variables and complexity, this generates num_function random functions of that number of variables and complexity,
     compiles each into a quantum circuit, and runs the circuit on num_inputs random inputs.
@@ -453,12 +450,11 @@ def run_benchmark_sample(graph : Graph, compile_type, clique_oracle_compiler, cl
     trials = Trials()
     
     if include_existing_trials:
-        if len(trials.get(graph_id=graph.graph_id, grover_iterations=grover_iterations, include_pending=True)) > 0:
+        if len(trials.get(graph_id=graph.graph_id, clique_size=clique_size, grover_iterations=grover_iterations, include_pending=True)) > 0:
             return
         
-    clique_oracle = clique_oracle_compiler(graph.g, clique_size)
-    debug_print(f"Looking for a clique with {clique_size} vertices")
-    job_id, simulation_counts = run_grover(clique_oracle, graph.n, graph.clique_counts[clique_size], shots=shots)
+    debug_print(f"Looking for a clique with {clique_size} vertices using {grover_iterations} iterations")
+    job_id, simulation_counts = run_grover(clique_oracle, graph.n, grover_iterations, shots=shots)
         
     trial = Trial(
         graph_id=graph.graph_id,
