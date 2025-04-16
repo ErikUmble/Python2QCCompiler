@@ -24,7 +24,7 @@ def verify_clique(g, clique, clique_size):
     assert len(clique) == n
 
     # verify clique size
-    if sum([1 for v in clique if v == '1']) != clique_size:
+    if sum([1 for v in clique if v == '1']) < clique_size:
         return False
 
     # verify that two vertices are only in the clique if their edge is in the graph

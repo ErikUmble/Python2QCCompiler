@@ -15,7 +15,8 @@ from qiskit_aer import AerSimulator
 from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
 
 
-from graph_database import Graphs, Graph
+from graph_database import Graphs, Graph, verify_clique
+
 load_dotenv()
 API_TOKEN = os.getenv("API_TOKEN")
 API_INSTANCE = os.getenv("API_INSTANCE", None)
@@ -54,20 +55,57 @@ class Trial:
         self.counts = counts
         self.simulation_counts = simulation_counts
 
-    @property
-    def graph(self):
-        return graph_db.get(self.graph_id)[0]
+        # cache the graph to avoid multiple database calls
+        self.graph = graph_db.get(self.graph_id)[0]
 
     @property
-    def expected_result(self):
-        raise NotImplementedError
+    def expected_success_rate(self):
+        graph = self.graph
+        n = graph.n
+        m = graph.clique_counts[self.clique_size]
+
+        if m == 0:
+            return 0
+
+        q = (2*m) / (2**n)
+        theta = math.atan(math.sqrt(q*(2-q))/(1-q))
+        phi = math.atan(math.sqrt(q/(2-q)))
+        return math.sin(self.grover_iterations * theta + phi)**2
     
     @property
     def success_rate(self):
         if self.counts is None:
             raise ValueError("Counts must be set before calculating success rate. Use get_counts() or get_counts_async() to update the counts.")
         
-        raise NotImplementedError
+        graph = self.graph
+        num_cliques_found = 0
+        num_shots = 0
+        for k, v in self.counts.items():
+            if k == "-1":
+                num_shots += v
+                continue
+            # reverse the bits to match the order in the graph
+            if verify_clique(graph.g, k[::-1], self.clique_size):
+                num_cliques_found += v
+            num_shots += v
+
+        return num_cliques_found / num_shots if num_shots > 0 else 0
+    
+    @property
+    def simulation_success_rate(self):
+        graph = self.graph
+        num_cliques_found = 0
+        num_shots = 0
+        for k, v in self.simulation_counts.items():
+            if k == "-1":
+                num_shots += v
+                continue
+
+            if verify_clique(graph.g, k[::-1], self.clique_size):
+                num_cliques_found += v
+            num_shots += v
+
+        return num_cliques_found / num_shots if num_shots > 0 else 0
     
     def mark_failure(self):
         if self.counts is not None:
@@ -210,10 +248,11 @@ class Trials:
             cursor.execute("SELECT * FROM clique_trials")
             return self._as_trials(cursor.fetchall())
         
-    def get(self, graph_id=None, graph=None, compile_type=None, clique_size=None, grover_iterations=None, job_id=None, include_pending=False):
+    def get(self, graph_id=None, graph=None, n=None, compile_type=None, clique_size=None, grover_iterations=None, job_id=None, include_pending=False):
         
         params = []
         query_parts = []
+        graph_query_parts = []
 
         if graph_id is not None:
             query_parts.append("graph_id = ?")
@@ -239,20 +278,30 @@ class Trials:
             query_parts.append("NOT counts = ?")
             params.append("")
 
-        if graph is None:
-            query = "SELECT * FROM clique_trials WHERE " + " AND ".join(query_parts)
-
-        else:
-            # we need a join with graphs table
+        if graph is not None:
             if isinstance(graph, Graph):
                 graph = graph.g
+            graph_query_parts.append("graphs.g = ?")
             params.append(graph)
 
-            if len(query_parts) > 0:
-                query = "SELECT clique_trials.* FROM clique_trials JOIN graphs ON clique_trials.graph_id = graphs.id WHERE " + " AND ".join(query_parts) + " AND graphs.g = ?"
-            else:
-                query = "SELECT clique_trials.* FROM clique_trials JOIN graphs ON clique_trials.graph_id = graphs.id WHERE graphs.g = ?"
-        
+        if n is not None:
+            graph_query_parts.append("graphs.n = ?")
+            params.append(n)
+
+
+        # handle the different cases for joins and/or filtering
+        if len(graph_query_parts) == 0 and len(query_parts) == 0:
+            query = "SELECT * FROM clique_trials"
+
+        elif len(graph_query_parts) > 0 and len(query_parts) > 0:
+            query = "SELECT clique_trials.* FROM clique_trials JOIN graphs ON clique_trials.graph_id = graphs.id WHERE " + " AND ".join(query_parts + graph_query_parts)
+
+        elif len(graph_query_parts) > 0:
+            query = "SELECT clique_trials.* FROM clique_trials JOIN graphs ON clique_trials.graph_id = graphs.id WHERE " + " AND ".join(graph_query_parts)
+
+        else:
+            query = "SELECT * FROM clique_trials WHERE " + " AND ".join(query_parts)
+            
         with self._connect() as conn:
             cursor = conn.cursor()
             cursor.execute(query, params)
