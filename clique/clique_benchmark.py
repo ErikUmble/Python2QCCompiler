@@ -442,7 +442,7 @@ def _clique_size_to_search_for(graph: Graph, target_grover_iterations: int):
     
     return clique_size - 1
 
-def clique_oracle_compiler_classical_function(graph: str, clique_size):
+def clique_oracle_compiler_classical_function(graph: Graph, clique_size):
     return _classical_function_to_oracle(construct_clique_verifier(graph, as_classical_function=True, clique_size=clique_size))
 
 def run_benchmark_sample(graph : Graph, compile_type, clique_oracle, clique_size, grover_iterations, shots=10**4, include_existing_trials=False):
