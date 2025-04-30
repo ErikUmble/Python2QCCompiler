@@ -294,10 +294,18 @@ class Trials:
             cursor = conn.cursor()
             cursor.execute(query)
             jobs = cursor.fetchall()
+
+        debug_print(f"Found {len(jobs)} jobs with missing results")
+        tasks = []
+        for job_id in [job[0] for job in jobs]:
+            tasks.append(self.use_job_results(job_id))
         
-        # we could try to parallelize this, but this at least conserves memory
-        for job in jobs:
-            await self.use_job_results(job[0])
+        # process tasks in batches to avoid overwhelming the API or memory
+        batch_size = 3
+        for i in range(0, len(tasks), batch_size):
+            batch = tasks[i:i+batch_size]
+            debug_print(f"Processing batch {i//batch_size + 1} of {(len(tasks) + batch_size - 1)//batch_size}")
+            await asyncio.gather(*batch)
 
 
 def get_oracle(statement, variables):
@@ -418,7 +426,7 @@ def mark_job_failure(job_id):
         trials.save(trial)
         
 def create_compilation_failure_trial(num_vars, complexity, statement, trials=None):
-    trial = Trial(num_vars=num_vars, complexity=complexity, job_id="_compilation_failed_", job_pub_idx=0, statement=statement)
+    trial = Trial(num_vars=num_vars, complexity=complexity, job_id="_compilation_failed_", input_state="-1", job_pub_idx=0, statement=statement)
     trial.mark_failure()
     if trials is not None:
         trials.save(trial)

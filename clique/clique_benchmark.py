@@ -342,9 +342,17 @@ class Trials:
             cursor.execute(query)
             jobs = cursor.fetchall()
         
-        # we could try to parallelize this, but this at least conserves memory
-        for job in jobs:
-            await self.use_job_results(job[0])
+        debug_print(f"Found {len(jobs)} jobs with missing results")
+        tasks = []
+        for job_id in [job[0] for job in jobs]:
+            tasks.append(self.use_job_results(job_id))
+        
+        # process tasks in batches to avoid overwhelming the API or memory
+        batch_size = 20
+        for i in range(0, len(tasks), batch_size):
+            batch = tasks[i:i+batch_size]
+            debug_print(f"Processing batch {i//batch_size + 1} of {(len(tasks) + batch_size - 1)//batch_size}")
+            await asyncio.gather(*batch)
 
 
 class SortPairNode:
@@ -395,7 +403,7 @@ def construct_clique_verifier(graph : str, as_classical_function=False, clique_s
     clique_size = clique_size or n//2
 
     # count whether there are at least clique_size vertices in the clique
-    statements.append("count = " + " and ".join(o for o in sort_outputs[:clique_size]))
+    statements.append("count = " + sort_outputs[clique_size-1])
 
     # whenever there is not an edge between two vertices, they cannot both be in the clique
     statements.append(f"edge_sat = {variables[0]} or not {variables[0]}") # this should be initialized to True, but qiskit classical function cannot yet parse True
@@ -416,6 +424,91 @@ def construct_clique_verifier(graph : str, as_classical_function=False, clique_s
         output = "def is_clique(" + ", ".join(variables) + "):\n    "
     output += "\n    ".join(statements)
     return output
+
+def direct_clique_oracle_circuit(graph, clique_size=None):
+    """ 
+    Given a graph in the form of binary string 
+    e_11 e_12 e_13 ... e_1n e_23 e_24 ... e_2n ... e_n-1n, returns a quantum oracle circuit for the 
+    verifier function of such a clique.
+
+    if clique_size is unspecified, the default is to require at least n/2 vertices
+    """
+    n = int((1 + (1 + 8*len(graph))**0.5) / 2)
+    ret_qubit = n
+    edge_sat_qubit = n + 1
+    count_sat_qubit = n + 2
+    variables = get_variables(n)
+    statements, sort_outputs = get_sort_statements(variables)
+    clique_size = clique_size or n//2
+    assert clique_size >= 1
+
+    # map variable names to qubit indices
+    var_map = {}
+    for i in range(n):
+        var_map[variables[i]] = i
+
+    num_sort_temps = len(statements) - 1
+    num_missing_edges = len(list(filter(lambda x: x == '0', graph)))
+
+    qc = qiskit.QuantumCircuit(n + 3 + num_missing_edges + num_sort_temps, n)
+    operations = []
+
+    # whenever there is not an edge between two vertices, they cannot both be in the clique
+    edge_idx = 0
+    qubit_idx = n+3
+    for i in range(n):
+        for j in range(i+1, n):
+            edge = graph[edge_idx]
+            edge_idx += 1
+            if edge == '0':
+                operations.append((qc.mcx, [i, j], qubit_idx))
+                qubit_idx += 1
+    for i in range(n+3, n+3+num_missing_edges):
+        operations.append((qc.x, [i], None))
+
+    if num_missing_edges > 0:
+        operations.append((qc.mcx, [i for i in range(n+3, n+3+num_missing_edges)], edge_sat_qubit))
+    else:
+        operations.append((qc.x, edge_sat_qubit))
+
+    # count whether there are at least clique_size vertices in the clique
+    for s in statements:
+        var_map[s.split('=')[0].strip()] = qubit_idx
+        qubit_idx += 1
+
+    var_map[sort_outputs[clique_size-1]] = count_sat_qubit
+
+    for s in statements:
+        res = var_map[s.split('=')[0].strip()]
+        if "or" in s:
+            var1, var2 = s.split('=')[1].split('or')
+            var1 = var_map[var1.strip()]
+            var2 = var_map[var2.strip()]
+            operations.append((qc.x, var1))
+            operations.append((qc.x, var2))
+            operations.append((qc.mcx, [var1, var2], res))
+            operations.append((qc.x, res))
+            operations.append((qc.x, var1))
+            operations.append((qc.x, var2))
+            continue
+
+        elif "and" in s:
+            var1, var2 = s.split('=')[1].split('and')
+            var1 = var_map[var1.strip()]
+            var2 = var_map[var2.strip()]
+            operations.append((qc.mcx, [var1, var2], res))
+            continue
+
+    # apply operations in forward order
+    for i in range(len(operations)):
+        op = operations[i][0]
+        op(*operations[i][1:])
+    qc.mcx([edge_sat_qubit, count_sat_qubit], ret_qubit)
+    # apply operations in reverse order
+    for i in range(len(operations)-1, -1, -1):
+        op = operations[i][0]
+        op(*operations[i][1:])
+    return qc
 
 
 def _classical_function_to_oracle(function_string):
@@ -453,8 +546,8 @@ def run_grover(oracle, n, grover_iterations, shots=10**4):
     Given oracle U_f that has m solutions, this runs a Grover's search circuit using U_f
     and returns the job_id, simulation_counts of the job that was submitted to the backend.
     """
-    assert oracle.num_qubits in [n, n+1]
-    uf_mode = oracle.num_qubits == n+1
+    #assert oracle.num_qubits in [n, n+1]
+    uf_mode = oracle.num_qubits >= n+1
     grover_op = grover_operator(oracle, reflection_qubits=range(n))
     
     search_circuit = qiskit.QuantumCircuit(oracle.num_qubits, n)
@@ -472,11 +565,15 @@ def run_grover(oracle, n, grover_iterations, shots=10**4):
     sampler = Sampler(backend)
     job = sampler.run([qc], shots=shots)
 
-    simulator = AerSimulator()
-    pass_manager = generate_preset_pass_manager(optimization_level=1, backend=simulator)
-    qc = pass_manager.run(search_circuit)
-    result = simulator.run(qc,shots=shots).result()
-    simulation_counts = result.get_counts()
+    try:
+        simulator = AerSimulator(n_qubits=search_circuit.num_qubits)
+        pass_manager = generate_preset_pass_manager(optimization_level=1, backend=simulator)
+        qc = pass_manager.run(search_circuit)
+        result = simulator.run(qc,shots=shots).result()
+        simulation_counts = result.get_counts()
+    except Exception as e:
+        print(f"Error running simulation: {e}")
+        simulation_counts = None
 
     return job.job_id(), simulation_counts
 
@@ -512,7 +609,7 @@ def run_benchmark_sample(graph : Graph, compile_type, clique_oracle, clique_size
     trials = Trials()
     
     if include_existing_trials:
-        if len(trials.get(graph=graph, clique_size=clique_size, grover_iterations=grover_iterations, include_pending=True)) > 0:
+        if len(trials.get(graph=graph, compile_type=compile_type, clique_size=clique_size, grover_iterations=grover_iterations, include_pending=True)) > 0:
             return
         
     debug_print(f"Looking for a clique with {clique_size} vertices using {grover_iterations} iterations")
