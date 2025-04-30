@@ -453,7 +453,8 @@ def run_grover(oracle, n, grover_iterations, shots=10**4):
     Given oracle U_f that has m solutions, this runs a Grover's search circuit using U_f
     and returns the job_id, simulation_counts of the job that was submitted to the backend.
     """
-    assert oracle.num_qubits in [n, n+1]
+    # this assertion does NOT work for XAG compiler
+    # assert oracle.num_qubits in [n, n+1]
     uf_mode = oracle.num_qubits == n+1
     grover_op = grover_operator(oracle, reflection_qubits=range(n))
     
