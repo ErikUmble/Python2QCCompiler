@@ -26,7 +26,7 @@ service = QiskitRuntimeService(
 backend = service.backend(name="ibm_rensselaer")
 graph_db = Graphs()
 
-#DEBUG = os.getenv("DEBUG", False)
+# DEBUG = os.getenv("DEBUG", False)
 DEBUG = True
 
 
