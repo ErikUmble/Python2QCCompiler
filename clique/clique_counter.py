@@ -10,6 +10,7 @@ import networkx as nx
 
 from graph_database import Graph
 
+
 @circuit_input(vertices=lambda n: BitVec(n))
 def parameterized_clique_counter_batcher(n: int, k: int, edges) -> BitVec(1):
     """Counts cliques of size k in a graph specified by the edge list."""
@@ -50,9 +51,11 @@ def parameterized_clique_counter(n: int, k: int, edges) -> BitVec(1):
 def oracle_from_graph(graph: str, clique_size: int) -> QuantumCircuit:
     # get edge list
     G = Graph(graph)
-    
+
     edges = G.as_adjacency_matrix().flatten().tolist()
     num_nodes = G.n
 
-    classical_circuit = QuantumCircuitFunction(parameterized_clique_counter_batcher, num_nodes, clique_size, edges)
+    classical_circuit = QuantumCircuitFunction(
+        parameterized_clique_counter_batcher, num_nodes, clique_size, edges
+    )
     return classical_circuit.synthesize_quantum_circuit()
