@@ -24,7 +24,8 @@ service = QiskitRuntimeService(channel="ibm_quantum", token=API_TOKEN, instance=
 backend = service.backend(name="ibm_rensselaer")
 graph_db = Graphs()
 
-DEBUG = os.getenv("DEBUG", False)
+#DEBUG = os.getenv("DEBUG", False)
+DEBUG = True
 
 class CompileType:
     DIRECT = "DIRECT"
