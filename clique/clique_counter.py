@@ -56,7 +56,6 @@ def oracle_from_graph(graph: str, clique_size: int) -> QuantumCircuit:
 
     # generate classical function source
     src, _ = parameterized_clique_counter_batcher(num_nodes, clique_size, edges)
-    print(src)
     parsed_function = FunctionParser(src.strip())
     xag = parsed_function._logic_network
 
