@@ -57,7 +57,8 @@ class Trial:
     def exact_match_rate(self):
         if self.counts is None:
             raise ValueError("Counts must be set before calculating exact match rate. Use get_counts() or get_counts_async() to update the counts.")
-        
+        if self.counts.get('-1') is not None:
+            return 0
         successes = self.counts.get(self.total_expected_results(), 0)
         return successes / sum(self.counts.values())
     
@@ -301,7 +302,7 @@ class Trials:
             tasks.append(self.use_job_results(job_id))
         
         # process tasks in batches to avoid overwhelming the API or memory
-        batch_size = 3
+        batch_size = 1
         for i in range(0, len(tasks), batch_size):
             batch = tasks[i:i+batch_size]
             debug_print(f"Processing batch {i//batch_size + 1} of {(len(tasks) + batch_size - 1)//batch_size}")
@@ -426,7 +427,7 @@ def mark_job_failure(job_id):
         trials.save(trial)
         
 def create_compilation_failure_trial(num_vars, complexity, statement, trials=None):
-    trial = Trial(num_vars=num_vars, complexity=complexity, job_id="_compilation_failed_", input_state="-1", job_pub_idx=0, statement=statement)
+    trial = Trial(num_vars=num_vars, complexity=complexity, job_id="_compilation_failed_", input_state="", job_pub_idx=0, statement=statement)
     trial.mark_failure()
     if trials is not None:
         trials.save(trial)

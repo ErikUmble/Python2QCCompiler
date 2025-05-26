@@ -447,7 +447,7 @@ def direct_clique_oracle_circuit(graph, clique_size=None):
     for i in range(n):
         var_map[variables[i]] = i
 
-    num_sort_temps = len(statements) - 1
+    num_sort_temps = len(statements)
     num_missing_edges = len(list(filter(lambda x: x == '0', graph)))
 
     qc = qiskit.QuantumCircuit(n + 3 + num_missing_edges + num_sort_temps, n)
