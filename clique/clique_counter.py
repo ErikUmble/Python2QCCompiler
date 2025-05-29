@@ -1,5 +1,5 @@
 from tweedledum.bool_function_compiler.decorators import circuit_input
-from tweedledum.bool_function_compiler.function_parser import FunctionParser
+from tweedledum.bool_function_compiler import QuantumCircuitFunction
 from tweedledum.synthesis import xag_synth, xag_cleanup
 from tweedledum.classical import optimize
 from tweedledum.passes import parity_decomp, linear_resynth
@@ -12,7 +12,7 @@ from graph_database import Graph
 
 @circuit_input(vertices=lambda n: BitVec(n))
 def parameterized_clique_counter_batcher(n: int, k: int, edges) -> BitVec(1):
-    """Counts cliques of size 2 in a graph specified by the edge list."""
+    """Counts cliques of size k in a graph specified by the edge list."""
     s = BitVec(1, 1)  # Start with True (assuming a clique)
 
     # Check if any non-connected vertices are both selected
@@ -31,7 +31,7 @@ def parameterized_clique_counter_batcher(n: int, k: int, edges) -> BitVec(1):
 
 @circuit_input(vertices=lambda n: BitVec(n))
 def parameterized_clique_counter(n: int, k: int, edges) -> BitVec(1):
-    """Counts cliques of size 2 in a graph specified by the edge list."""
+    """Counts cliques of size k in a graph specified by the edge list."""
     s = BitVec(1, 1)  # Start with True (assuming a clique)
 
     # Check if any non-connected vertices are both selected
@@ -54,18 +54,5 @@ def oracle_from_graph(graph: str, clique_size: int) -> QuantumCircuit:
     edges = G.as_adjacency_matrix().flatten().tolist()
     num_nodes = G.n
 
-    # generate classical function source
-    src, _ = parameterized_clique_counter_batcher(num_nodes, clique_size, edges)
-    print(src)
-    parsed_function = FunctionParser(src.strip())
-    xag = parsed_function._logic_network
-
-    # XAG operations
-    xag = xag_cleanup(xag)
-    optimize(xag)
-    circ = xag_synth(xag)
-
-    # Circuit Optimization Passes
-    circ = parity_decomp(circ)
-    circ = linear_resynth(circ)
-    return td.converters.to_qiskit(circ, "gatelist")
+    classical_circuit = QuantumCircuitFunction(parameterized_clique_counter_batcher, num_nodes, clique_size, edges)
+    return classical_circuit.synthesize_quantum_circuit()

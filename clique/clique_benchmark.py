@@ -300,66 +300,107 @@ class Trials:
         grover_iterations=None,
         job_id=None,
         include_pending=False,
-    ):
+        trial_id=None,
+    ):  # Added trial_id
+        """
+        Retrieves trials from the database based on specified criteria.
+
+        If trial_id is provided, it fetches the specific trial by its ID,
+        ignoring other filter parameters. Otherwise, it filters based on
+        the other provided parameters.
+
+        Args:
+            graph_id (Optional[int]): Filter by graph_id.
+            graph (Optional[Union[Graph, Any]]): Filter by graph object or its representation.
+                                                 If a Graph object, its 'g' attribute is used.
+            n (Optional[int]): Filter by the number of nodes in the graph.
+            compile_type (Optional[str]): Filter by compile_type.
+            clique_size (Optional[int]): Filter by clique_size.
+            grover_iterations (Optional[int]): Filter by grover_iterations.
+            job_id (Optional[str]): Filter by job_id.
+            include_pending (bool): If False (default), trials with no 'counts' (empty string)
+                                    are excluded. If True, all trials are included.
+            trial_id (Optional[int]): Fetch a specific trial by its primary ID.
+
+        Returns:
+            List[Trial]: A list of Trial objects matching the criteria.
+        """
         params = []
         query_parts = []
         graph_query_parts = []
-
-        if graph_id is not None:
-            query_parts.append("graph_id = ?")
-            params.append(graph_id)
-
-        if compile_type is not None:
-            query_parts.append("compile_type = ?")
-            params.append(compile_type)
-
-        if clique_size is not None:
-            query_parts.append("clique_size = ?")
-            params.append(clique_size)
-
-        if grover_iterations is not None:
-            query_parts.append("grover_iterations = ?")
-            params.append(grover_iterations)
-
-        if job_id is not None:
-            query_parts.append("job_id = ?")
-            params.append(job_id)
-
-        if not include_pending:
-            query_parts.append("NOT counts = ?")
-            params.append("")
-
-        if graph is not None:
-            if isinstance(graph, Graph):
-                graph = graph.g
-            graph_query_parts.append("graphs.g = ?")
-            params.append(graph)
-
-        if n is not None:
-            graph_query_parts.append("graphs.n = ?")
-            params.append(n)
-
-        # handle the different cases for joins and/or filtering
-        if len(graph_query_parts) == 0 and len(query_parts) == 0:
-            query = "SELECT * FROM clique_trials"
-
-        elif len(graph_query_parts) > 0 and len(query_parts) > 0:
-            query = (
-                "SELECT clique_trials.* FROM clique_trials JOIN graphs ON clique_trials.graph_id = graphs.id WHERE "
-                + " AND ".join(query_parts + graph_query_parts)
-            )
-
-        elif len(graph_query_parts) > 0:
-            query = (
-                "SELECT clique_trials.* FROM clique_trials JOIN graphs ON clique_trials.graph_id = graphs.id WHERE "
-                + " AND ".join(graph_query_parts)
-            )
-
+        if trial_id is not None:
+            # If trial_id is provided, construct a query to fetch by primary key.
+            # Other filters are ignored in this case.
+            query = "SELECT * FROM clique_trials WHERE id = ?"
+            params.append(trial_id)
         else:
-            query = "SELECT * FROM clique_trials WHERE " + " AND ".join(query_parts)
+            # Existing logic for building query based on other parameters
+            if graph_id is not None:
+                query_parts.append(
+                    "clique_trials.graph_id = ?"
+                )  # Prefixed with table name for clarity in joins
+                params.append(graph_id)
+
+            if compile_type is not None:
+                query_parts.append("clique_trials.compile_type = ?")
+                params.append(compile_type)
+
+            if clique_size is not None:
+                query_parts.append("clique_trials.clique_size = ?")
+                params.append(clique_size)
+
+            if grover_iterations is not None:
+                query_parts.append("clique_trials.grover_iterations = ?")
+                params.append(grover_iterations)
+
+            if job_id is not None:
+                query_parts.append("clique_trials.job_id = ?")
+                params.append(job_id)
+
+            if not include_pending:
+                # Exclude trials where 'counts' is an empty string (convention for pending/no counts)
+                query_parts.append("NOT clique_trials.counts = ?")
+                params.append("")
+
+            if graph is not None:
+                # Assuming Graph is a defined class with a 'g' attribute
+                # if isinstance(graph, Graph): # Replace 'Graph' with the actual class name
+                #     graph_data = graph.g
+                # else:
+                #     graph_data = graph # Assuming 'graph' can also be the direct data
+                graph_data = (
+                    graph.g
+                    if hasattr(graph, "g") and not isinstance(graph, str)
+                    else graph
+                )  # More robust check
+                graph_query_parts.append("graphs.g = ?")
+                params.append(graph_data)
+
+            if n is not None:
+                graph_query_parts.append("graphs.n = ?")
+                params.append(n)
+
+            # Determine the query structure based on whether graph-related filters are present
+            if len(graph_query_parts) > 0:
+                base_query = "SELECT clique_trials.* FROM clique_trials JOIN graphs ON clique_trials.graph_id = graphs.id"
+                all_conditions = query_parts + graph_query_parts
+                if all_conditions:
+                    query = f"{base_query} WHERE " + " AND ".join(all_conditions)
+                else:
+                    query = (
+                        base_query  # Join but no specific WHERE conditions from params
+                    )
+            else:  # No graph_query_parts, so no JOIN needed unless forced by other logic
+                base_query = "SELECT * FROM clique_trials"
+                if query_parts:
+                    query = f"{base_query} WHERE " + " AND ".join(query_parts)
+                else:
+                    # No trial_id, no query_parts, no graph_query_parts means select all
+                    query = base_query
 
         with self._connect() as conn:
             cursor = conn.cursor()
+            # print(f"Executing query: {query} with params: {params}") # For debugging
             cursor.execute(query, params)
             return self._as_trials(cursor.fetchall())
 
@@ -458,7 +499,7 @@ def get_sort_statements(variables):
         nodes[num_variables - 1][i].low for i in range(num_variables - 1, 0, -1)
     ]
 
-    return statements, outputs
+    return statements, outputs1
 
 
 def get_variables(num_vars):
@@ -659,17 +700,17 @@ def run_grover(oracle, n, grover_iterations, shots=10**4):
     sampler = Sampler(backend)
     job = sampler.run([qc], shots=shots)
 
+    simulation_counts = None
     try:
-        simulator = AerSimulator(n_qubits=search_circuit.num_qubits)
+        simulator = AerSimulator()
         pass_manager = generate_preset_pass_manager(
-            optimization_level=1, backend=simulator
+            optimization_level=3, backend=simulator
         )
         qc = pass_manager.run(search_circuit)
         result = simulator.run(qc, shots=shots).result()
         simulation_counts = result.get_counts()
     except Exception as e:
-        print(f"Error running simulation: {e}")
-        simulation_counts = None
+        debug_print(f"Error {e} while creating simulator circuit and running")
 
     return job.job_id(), simulation_counts
 
@@ -754,6 +795,13 @@ def run_benchmark_sample(
         job_pub_idx=0,
         simulation_counts=simulation_counts,
     )
+
+    # XAG can produce very large graphs that the simulator cannot run.
+    # This should be considered a failure and the trial is marked as such
+    # simulation_counts is None if the simulator failed
+    if simulation_counts is None:
+        trial.mark_failure()
+
     trials.save(trial)
     return trial
 
