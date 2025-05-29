@@ -1,14 +1,9 @@
-from tweedledum.bool_function_compiler.decorators import circuit_input
-from tweedledum.bool_function_compiler import QuantumCircuitFunction
-from tweedledum.synthesis import xag_synth, xag_cleanup
-from tweedledum.classical import optimize
-from tweedledum.passes import parity_decomp, linear_resynth
-from tweedledum import BitVec
-import tweedledum as td
-from qiskit import QuantumCircuit
-import networkx as nx
-
 from graph_database import Graph
+from qiskit import QuantumCircuit
+from tweedledum import BitVec
+from tweedledum.bool_function_compiler import QuantumCircuitFunction
+from tweedledum.bool_function_compiler.decorators import circuit_input
+
 
 @circuit_input(vertices=lambda n: BitVec(n))
 def parameterized_clique_counter_batcher(n: int, k: int, edges) -> BitVec(1):
@@ -50,9 +45,11 @@ def parameterized_clique_counter(n: int, k: int, edges) -> BitVec(1):
 def oracle_from_graph(graph: str, clique_size: int) -> QuantumCircuit:
     # get edge list
     G = Graph(graph)
-    
+
     edges = G.as_adjacency_matrix().flatten().tolist()
     num_nodes = G.n
 
-    classical_circuit = QuantumCircuitFunction(parameterized_clique_counter_batcher, num_nodes, clique_size, edges)
+    classical_circuit = QuantumCircuitFunction(
+        parameterized_clique_counter_batcher, num_nodes, clique_size, edges
+    )
     return classical_circuit.synthesize_quantum_circuit()
