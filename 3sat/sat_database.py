@@ -517,12 +517,8 @@ def generate_3sat_database(
 
 def get_sat_with_one_solution(num_vars: int, seed: Optional[int] = None) -> ThreeSat:
     """
-    Generate a random SAT problem with a unique solution.
+    Generate a random SAT problem with very few solutions
 
-    The idea comes from the idea of arithmetic equations with a single solution.
-    3x + 2 - 5 = 0 is a SAT instance with ONE solution x = 1
-    If we can encode this into a boolean expression and then reduce that expression to CNF
-    then we have a SAT problem with one solution. Hopefully this produces better results with Grover
-
-    As a bonus we can start to test the capability of tranlating basic arithmetic to quantum
+    Using the "Planted" solution, we come up with a random assignment of the variables, 
+    and then generate clauses randomly and only keep the clauses that are satisfied by our assignment.
     """

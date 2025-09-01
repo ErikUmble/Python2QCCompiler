@@ -1,5 +1,7 @@
 # sqlite database files (save these in dropbox instead of on git)
 *.db
+*.db-wal
+*.db-shm
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

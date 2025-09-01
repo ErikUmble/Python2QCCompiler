@@ -22,7 +22,7 @@ service = QiskitRuntimeService(
 )
 backend = service.backend(name="ibm_rensselaer")
 
-#DEBUG = os.getenv("DEBUG", False)
+# DEBUG = os.getenv("DEBUG", False)
 DEBUG = True
 
 
@@ -80,7 +80,7 @@ class Trial:
             return 0.0
 
         q = (2 * m) / (2**num_vars)
-        if(q == 1.0):
+        if q == 1.0:
             return 0.5
         theta = math.atan(math.sqrt(q * (2 - q)) / (1 - q))
         phi = math.atan(math.sqrt(q / (2 - q)))
@@ -105,8 +105,10 @@ class Trial:
             # build assignment map variable -> True/False
             # NOTE: variable numbers start at 1 rather than 0
             # reverse k for proper bit order
-            
-            assignment_map = [i + 1 if bit == '1' else -(i+1) for i, bit in enumerate(k[::-1])]
+
+            assignment_map = [
+                i + 1 if bit == "1" else -(i + 1) for i, bit in enumerate(k[::-1])
+            ]
 
             # Effecient SAT solver
             from pysat.solvers import Glucose3 as Glucose
@@ -386,7 +388,7 @@ class Trials:
 
     def _use_job_results(self, job_id, results):
         """
-        Given a job_id and the results of the job, 
+        Given a job_id and the results of the job,
         this updates the counts for all trials with that job_id
         """
         with self._connect() as conn:
@@ -402,7 +404,7 @@ class Trials:
 
     async def use_job_results(self, job_id):
         """
-        Given a job_id, this fetches the results of the job 
+        Given a job_id, this fetches the results of the job
         and updates the counts for all trials with that job_id
         """
         retrieved_job = await asyncio.to_thread(service.job, job_id)
@@ -415,7 +417,7 @@ class Trials:
 
     async def load_results(self):
         """
-        Loads counts results for all trials that do not yet have them, 
+        Loads counts results for all trials that do not yet have them,
         saving the updated trials to the database
         """
         query = "SELECT DISTINCT job_id FROM sat_trials WHERE counts = ''"
@@ -443,7 +445,7 @@ def run_grover(oracle, n, grover_iterations, shots=10**4):
     Given oracle U_f that has m solutions, this runs a Grover's search circuit using U_f
     and returns the job_id, simulation_counts of the job that was submitted to the backend.
     """
-    # NOTE: This may be screwing up expected results 
+    # NOTE: This may be screwing up expected results
     uf_mode = oracle.num_qubits == n + 1
     grover_op = grover_operator(oracle, reflection_qubits=range(n))
 
