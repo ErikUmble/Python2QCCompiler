@@ -1,6 +1,5 @@
-from typing import Optional, Dict, Union
-
 import logging
+from typing import Dict, Optional, Union
 
 from .core import *  # noqa: F403
 
@@ -21,8 +20,11 @@ from .compilers import (
     compare_compilers,
 )
 
-from . import algorithms as algorithms
-from . import analysis as analysis
+from . import pipeline
+
+from . import databases
+from . import algorithms
+from . import analysis
 
 QUANTUM_BENCHMARKING_LOGGER = __name__
 
