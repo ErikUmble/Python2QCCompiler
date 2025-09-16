@@ -1,0 +1,339 @@
+"""
+Pipeline-Based Quantum Circuit Compiler System
+
+A flexible, composable architecture for quantum circuit synthesis and optimization.
+Each compiler consists of a Synthesizer (creates initial circuit) and a series of
+PipelineSteps (transform the circuit).
+"""
+
+import json
+import logging
+import time
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional
+
+from qiskit import QuantumCircuit, transpile
+from qiskit.circuit import Instruction
+from qiskit_ibm_runtime import IBMBackend
+
+from .. import ProblemInstance
+from .pipeline_steps import PipelineStep, QiskitTranspile, StepRegistry
+from .synthesis import Synthesizer, SynthesizerRegistry
+
+logger = logging.getLogger("benchmarklib.pipeline")
+
+# ============================================================================
+# CIRCUIT METRICS
+# ============================================================================
+
+
+@dataclass
+class CircuitMetrics:
+    """Metrics for a quantum circuit at a specific compilation stage."""
+
+    num_qubits: int
+    depth: int
+    gate_count: int
+
+    # Gate breakdown
+    entangling_count: int = 0
+    single_qubit_count: int = 0
+
+    ops: Dict[Instruction, int] = field(default_factory=dict)
+    # Custom metrics
+    extra_metrics: Dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_circuit(cls, circuit: QuantumCircuit) -> "CircuitMetrics":
+        """Extract metrics from a quantum circuit."""
+        from collections import defaultdict
+
+        ops_count = circuit.count_ops()
+
+        counts = defaultdict(int)
+        for inst in circuit.data:
+            counts[len(inst.qubits)] += 1
+
+        # Count 2 qb gates
+        entangling_gate_count = sum(
+            [count for n_qubits, count in counts.items() if n_qubits > 1]
+        )
+
+        single_qubit_count = counts[1]
+
+        metrics = cls(
+            num_qubits=circuit.num_qubits,
+            depth=circuit.depth(),
+            gate_count=circuit.size(),
+            entangling_count=entangling_gate_count,
+            single_qubit_count=single_qubit_count,
+            ops=ops_count,
+        )
+
+        return metrics
+
+
+# ============================================================================
+# PIPELINE COMPILER
+# ============================================================================
+
+
+@dataclass
+class CompilationResult:
+    """Complete result from a pipeline compilation."""
+
+    compiler_name: str
+    success: bool
+    total_time: float
+
+    # Metrics at different stages
+    synthesis_metrics: Optional[CircuitMetrics] = None  # After synthesis
+    high_level_metrics: Optional[CircuitMetrics] = None  # After pipeline steps
+    low_level_metrics: Optional[CircuitMetrics] = None  # After transpilation
+
+    # Timing breakdown
+    synthesis_time: float = 0.0
+    pipeline_times: List[float] = field(default_factory=list)
+    transpilation_time: float = 0.0
+
+    # Error tracking
+    error_message: Optional[str] = None
+    error_stage: Optional[str] = None
+
+    # Final circuit (optional - can be large)
+    synthesis_circuit: Optional[QuantumCircuit] = None
+    final_circuit: Optional[QuantumCircuit] = None
+
+    # Pipeline configuration for reproducibility
+    pipeline_config: Optional[Dict[str, Any]] = None
+
+
+class PipelineCompiler:
+    """
+    A compiler that applies a synthesizer followed by a series of pipeline steps.
+
+    Naming convention: "Synthesizer+Step1+Step2+...+StepN"
+    """
+
+    def __init__(
+        self,
+        synthesizer: Synthesizer,
+        steps: Optional[List[PipelineStep]] = None,
+        backend: Optional[IBMBackend] = None,
+        transpile_options: Optional[Dict[str, Any]] = None,
+    ):
+        """
+        Initialize a pipeline compiler.
+
+        Args:
+            synthesizer: Initial circuit synthesizer
+            steps: List of pipeline transformation steps
+            backend: Optional backend for transpilation
+            transpile_options: Options for transpilation
+        """
+        self.synthesizer = synthesizer
+        self.steps = steps or []
+        self.backend = backend
+        self.transpile_options = transpile_options or {"optimization_level": 3}
+
+        # Generate name based on components
+        step_names = [step.name for step in self.steps]
+        self.name = "+".join([synthesizer.name] + step_names)
+
+    def compile(
+        self, problem: "ProblemInstance", return_intermediate: bool = False, **kwargs
+    ) -> CompilationResult:
+        """
+        Run the complete compilation pipeline.
+
+        Args:
+            problem: Problem instance to compile
+            return_intermediate: Whether to keep intermediate circuits
+            **kwargs: Problem-specific parameters
+
+        Returns:
+            CompilationResult with metrics and timings
+        """
+        result = CompilationResult(
+            compiler_name=self.name,
+            success=False,
+            total_time=0.0,
+            pipeline_config=self.to_dict(),
+        )
+
+        start_time = time.time()
+
+        try:
+            # Stage 1: Synthesis
+            synthesis_start = time.time()
+            circuit = self.synthesizer.synthesize(problem, **kwargs)
+            result.synthesis_time = time.time() - synthesis_start
+            result.synthesis_metrics = CircuitMetrics.from_circuit(circuit)
+            result.synthesis_circuit = circuit
+
+            # Stage 2: Pipeline steps
+            for step in self.steps:
+                pipeline_start = time.time()
+                circuit = step.transform(self.synthesizer, circuit, **kwargs)
+                result.pipeline_times.append(time.time() - pipeline_start)
+            result.high_level_metrics = CircuitMetrics.from_circuit(circuit)
+
+            # Stage 3: Transpilation (if backend provided)
+            if self.backend:
+                transpile_start = time.time()
+                transpiled = transpile(circuit, self.backend, **self.transpile_options)
+                result.transpilation_time = time.time() - transpile_start
+                result.low_level_metrics = CircuitMetrics.from_circuit(transpiled)
+
+                if return_intermediate:
+                    result.final_circuit = transpiled
+            else:
+                # No transpilation - high level is final
+                result.low_level_metrics = result.high_level_metrics
+                if return_intermediate:
+                    result.final_circuit = circuit
+
+            result.success = True
+
+        except Exception as e:
+            result.error_message = str(e)
+            result.error_stage = self._get_error_stage(result)
+            logger.error(f"Compilation failed at {result.error_stage}: {e}")
+
+        result.total_time = time.time() - start_time
+        return result
+
+    def _get_error_stage(self, result: CompilationResult) -> str:
+        """Determine which stage failed based on timing."""
+        if result.synthesis_time == 0:
+            return "synthesis"
+        elif len(result.pipeline_times) != len(self.steps):
+            return "pipeline"
+        elif result.transpilation_time == 0 and self.backend:
+            return "transpilation"
+        return "unknown"
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize compiler configuration."""
+        return {
+            "name": self.name,
+            "synthesizer": self.synthesizer.to_dict(),
+            "steps": [step.to_dict() for step in self.steps],
+            "transpile_options": self.transpile_options,
+        }
+
+    @classmethod
+    def from_dict(
+        cls, data: Dict[str, Any], backend: Optional[IBMBackend] = None
+    ) -> "PipelineCompiler":
+        """Deserialize compiler from configuration."""
+        synthesizer = SynthesizerRegistry.from_dict(data["synthesizer"])
+        steps = [StepRegistry.from_dict(step_data) for step_data in data["steps"]]
+
+        return cls(
+            synthesizer=synthesizer,
+            steps=steps,
+            backend=backend,
+            transpile_options=data.get("transpile_options"),
+        )
+
+
+# ============================================================================
+# COMPILER FACTORY
+# ============================================================================
+
+
+class CompilerFactory:
+    """Factory for creating common compiler configurations."""
+
+    @staticmethod
+    def create_basic_compilers() -> List[PipelineCompiler]:
+        """Create basic compiler configurations."""
+        compilers = []
+
+        # Raw synthesizers
+        for synthesizer in [
+            XAGSynthesizer(),
+            TruthTableSynthesizer(),
+            ClassiqSynthesizer(),
+        ]:
+            compilers.append(PipelineCompiler(synthesizer))
+
+        # With Qiskit optimization
+        for level in [1, 2, 3]:
+            compilers.append(
+                PipelineCompiler(XAGSynthesizer(), [QiskitOptimizationStep(level)])
+            )
+
+        return compilers
+
+    @staticmethod
+    def create_advanced_compilers() -> List[PipelineCompiler]:
+        """Create advanced compiler configurations with multiple steps."""
+        compilers = []
+
+        # Multi-step optimization pipeline
+        advanced_steps = [
+            QiskitTranspile(optimization_level=3),
+        ]
+
+        for synthesizer in [XAGSynthesizer(), ClassiqSynthesizer()]:
+            compilers.append(PipelineCompiler(synthesizer, advanced_steps))
+
+        return compilers
+
+    @staticmethod
+    def from_config_file(
+        filepath: str, backend: Optional[IBMBackend] = None
+    ) -> List[PipelineCompiler]:
+        """Load compiler configurations from JSON file."""
+        with open(filepath, "r") as f:
+            configs = json.load(f)
+
+        compilers = []
+        for config in configs:
+            compiler = PipelineCompiler.from_dict(config, backend)
+            compilers.append(compiler)
+
+        return compilers
+
+
+# ============================================================================
+# USAGE EXAMPLE
+# ============================================================================
+
+
+def example_usage():
+    """Example of how to use the pipeline compiler system."""
+
+    # Create a compiler with multiple optimization steps
+    compiler = PipelineCompiler(
+        synthesizer=XAGSynthesizer(optimize=True),
+        steps=[
+            CommutationAnalysisStep(),
+            CliffordSimplificationStep(),
+            QiskitOptimizationStep(optimization_level=3),
+        ],
+    )
+
+    # The compiler name is automatically generated
+    print(f"Compiler name: {compiler.name}")
+    # Output: "XAG_OPT+Commute+CliffordSimp+QiskitOpt3"
+
+    # Serialize for storage
+    config = compiler.to_dict()
+    print(f"Serialized config: {json.dumps(config, indent=2)}")
+
+    # Recreate from config
+    restored = PipelineCompiler.from_dict(config)
+    assert restored.name == compiler.name
+
+    # Use in benchmarking
+    # result = compiler.compile(problem_instance, clique_size=3)
+    # print(f"Success: {result.success}")
+    # print(f"High-level depth: {result.high_level_metrics.depth}")
+    # print(f"Low-level CX count: {result.low_level_metrics.cx_count}")
+
+
+if __name__ == "__main__":
+    example_usage()

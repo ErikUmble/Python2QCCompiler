@@ -4,58 +4,63 @@ from typing import Optional
 import tweedledum as td
 from qiskit import QuantumCircuit
 from tweedledum.bool_function_compiler import QuantumCircuitFunction
+from tweedledum.classical import optimize
 from tweedledum.passes import linear_resynth, parity_decomp
-from tweedledum.synthesis import pkrm_synth
+from tweedledum.synthesis import xag_cleanup, xag_synth
 
-from .base import SynthesisCompiler, clique_oracle
-from ..core import ProblemInstance
-from ..problems import CliqueProblem
+from ... import CliqueProblem, ProblemInstance
+from .synthesizer import Synthesizer, SynthesizerRegistry, clique_oracle
 
-logger = logging.getLogger("benchmarklib.compiler.truth_table")
+logger = logging.getLogger("benchmarklib.pipeline.synthesis.xag")
 
 
-class TruthTableCompiler(SynthesisCompiler):
+@SynthesizerRegistry.register
+class XAGSynthesizer(Synthesizer):
     """
-    Compiler using truth table synthesis (PKRM - Positive-polarity Reed-Muller).
+    Synthesis using XAG (XOR-AND Graph) synthesis from Tweedledum.
 
-    This approach:
-    1. Simulates the classical function to get its truth table
-    2. Uses PKRM synthesis for the truth table
-    3. Applies optimization passes
-    4. Converts to phase-flip oracle
-
-    Note: Truth table approach scales exponentially with problem size!
+    This compiler:
+    1. Creates a QuantumCircuitFunction from the problem's classical function
+    2. Optionally optimizes the XAG representation
+    3. Synthesizes using xag_synth
+    4. Applies optimization passes
+    5. Converts to phase-flip oracle
     """
+
+    def __init__(self):
+        """
+        Initialize XAG compiler.
+        """
 
     @property
     def name(self) -> str:
-        return self.__class__.__name__
+        return str(self.__class__.__name__)
 
-    def compile(self, problem: ProblemInstance, **kwargs) -> QuantumCircuit:
+    def synthesize(self, problem: ProblemInstance, **kwargs) -> QuantumCircuit:
         """
-        Compile problem instance to phase-flip oracle using truth table synthesis.
+        Compile problem instance to phase-flip oracle using XAG synthesis.
 
         Args:
             problem: Problem instance to compile
-            **kwargs: Problem-specific parameters
+            **kwargs: Problem-specific parameters (e.g., clique_size)
 
         Returns:
             Phase-flip oracle quantum circuit
         """
+        # Determine which classical function to use based on problem type
         if isinstance(problem, CliqueProblem):
             return self._compile_clique(problem, **kwargs)
         else:
             raise NotImplementedError(
-                f"TruthTableCompiler doesn't support {problem.problem_type} problems yet"
+                f"XAGCompiler doesn't support {problem.problem_type} problems yet"
             )
 
     def _compile_clique(self, problem: CliqueProblem, **kwargs) -> QuantumCircuit:
-        """Compile clique problem using truth table synthesis."""
+        """Compile clique problem to oracle."""
         clique_size = kwargs.get("clique_size")
         if clique_size is None:
             raise ValueError("clique_size must be specified for clique problems")
 
-        # Choose the parameterized function
         param_func = clique_oracle
 
         # Get edge list from problem
@@ -66,15 +71,18 @@ class TruthTableCompiler(SynthesisCompiler):
         classical_inputs = {"n": n, "k": clique_size, "edges": edges}
         qc_func = QuantumCircuitFunction(param_func, **classical_inputs)
 
-        # Simulate to get truth table
-        logger.debug("Simulating to get truth table...")
-        qc_func.simulate_all()
+        # Get XAG and optionally optimize
+        xag = qc_func.logic_network()
 
-        # Synthesize from truth table
-        logger.debug("Synthesizing from truth table...")
-        td_circuit = pkrm_synth(qc_func._truth_table[0])
+        logger.debug("Optimizing XAG...")
+        xag = xag_cleanup(xag)
+        optimize(xag)
 
-        # Apply optimization passes
+        # Synthesize
+        logger.debug("Synthesizing from XAG...")
+        td_circuit = xag_synth(xag)
+
+        # Apply Tweedledum optimization passes
         logger.debug("Applying optimization passes...")
         td_circuit = parity_decomp(td_circuit)
         td_circuit = linear_resynth(td_circuit)
@@ -83,14 +91,15 @@ class TruthTableCompiler(SynthesisCompiler):
         qiskit_circuit = td.converters.to_qiskit(td_circuit, circuit_type="gatelist")
 
         # Convert to phase-flip oracle
-        oracle_qubit = qiskit_circuit.num_qubits - 1
+        # The oracle qubit is the last qubit (output of the function)
+        self.oracle_qubit = n
 
         phase_oracle = QuantumCircuit(qiskit_circuit.num_qubits)
-        phase_oracle.x(oracle_qubit)
-        phase_oracle.h(oracle_qubit)
+        phase_oracle.x(self.oracle_qubit)
+        phase_oracle.h(self.oracle_qubit)
         phase_oracle.compose(qiskit_circuit, inplace=True)
-        phase_oracle.h(oracle_qubit)
-        phase_oracle.x(oracle_qubit)
+        phase_oracle.h(self.oracle_qubit)
+        phase_oracle.x(self.oracle_qubit)
 
         return phase_oracle
 

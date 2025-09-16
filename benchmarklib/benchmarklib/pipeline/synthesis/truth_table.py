@@ -1,5 +1,4 @@
 import logging
-from typing import Optional
 
 import tweedledum as td
 from qiskit import QuantumCircuit
@@ -7,14 +6,14 @@ from tweedledum.bool_function_compiler import QuantumCircuitFunction
 from tweedledum.passes import linear_resynth, parity_decomp
 from tweedledum.synthesis import pkrm_synth
 
-from .base import SynthesisCompiler, clique_oracle
-from ..core import ProblemInstance
-from ..problems import CliqueProblem
+from ... import CliqueProblem, ProblemInstance
+from .synthesizer import Synthesizer, clique_oracle, SynthesizerRegistry
 
-logger = logging.getLogger("benchmarklib.compiler.truth_table")
+logger = logging.getLogger("benchmarklib.pipeline.synthesis.truth_table")
 
 
-class TruthTableCompiler(SynthesisCompiler):
+@SynthesizerRegistry.register
+class TruthTableSynthesizer(Synthesizer):
     """
     Compiler using truth table synthesis (PKRM - Positive-polarity Reed-Muller).
 
@@ -29,11 +28,11 @@ class TruthTableCompiler(SynthesisCompiler):
 
     @property
     def name(self) -> str:
-        return self.__class__.__name__
+        return str(self.__class__.__name__)
 
-    def compile(self, problem: ProblemInstance, **kwargs) -> QuantumCircuit:
+    def synthesize(self, problem: ProblemInstance, **kwargs) -> QuantumCircuit:
         """
-        Compile problem instance to phase-flip oracle using truth table synthesis.
+        Synthesize problem instance to phase-flip oracle using truth table synthesis.
 
         Args:
             problem: Problem instance to compile
@@ -93,10 +92,3 @@ class TruthTableCompiler(SynthesisCompiler):
         phase_oracle.x(oracle_qubit)
 
         return phase_oracle
-
-    def target_qubit(self) -> Optional[int]:
-        """
-        Return the index of the target qubit of the oracle
-        """
-
-        return self.oracle_qubit if self.oracle_qubit else None
