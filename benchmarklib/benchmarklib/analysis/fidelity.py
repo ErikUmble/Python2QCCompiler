@@ -8,13 +8,13 @@ from classiq.interface.generator.functions.classical_type import (
 )
 from qiskit.quantum_info import hellinger_fidelity
 
-from .. import (
-    BenchmarkDatabase,
+from ..compilers import (
     ClassiqCompiler,
     SynthesisCompiler,
     TruthTableCompiler,
     XAGCompiler,
 )
+from ..core import BenchmarkDatabase
 
 logger = logging.getLogger("benchmarklib.analysis")
 

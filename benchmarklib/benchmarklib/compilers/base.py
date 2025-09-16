@@ -9,6 +9,9 @@ Key Components:
 - SynthesisTrial: Stores synthesis benchmark results
 - SynthesisBenchmark: Orchestrates the benchmarking process
 """
+# important that tweedledum is imported before qiskit_ibm_runtime (to avoid bad cast crash)
+from tweedledum import BitVec
+from tweedledum.bool_function_compiler import circuit_input
 
 import logging
 import time
@@ -19,10 +22,8 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 from qiskit import QuantumCircuit, transpile
 from qiskit_ibm_runtime import IBMBackend
-from tweedledum import BitVec
-from tweedledum.bool_function_compiler import circuit_input
 
-from .. import BaseTrial, BenchmarkDatabase, ProblemInstance
+from ..core import BaseTrial, BenchmarkDatabase, ProblemInstance
 
 logger = logging.getLogger("benchmarklib.compiler")
 

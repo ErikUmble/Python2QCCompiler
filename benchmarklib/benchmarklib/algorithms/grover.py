@@ -29,7 +29,8 @@ from qiskit_ibm_runtime import Batch, QiskitRuntimeService, SamplerOptions
 from qiskit_ibm_runtime import SamplerV2 as Sampler
 from qiskit_ibm_runtime.options import dynamical_decoupling_options
 
-from .. import BaseTrial, BenchmarkDatabase, ProblemInstance, SynthesisCompiler
+from ..core import BaseTrial, BenchmarkDatabase, ProblemInstance
+from ..compilers import SynthesisCompiler
 
 logger = logging.getLogger("benchmarklib.algorithms.grover")
 
@@ -463,6 +464,11 @@ def calculate_grover_iterations(num_solutions: int, total_states: int) -> int:
 
     where $M$ is the number of solutions and $N$ is the total number of states.
 
+    This comes from the probability of success 
+    $$P(k)=\\sin^2((2k+1)\theta)$$
+    where k is the number of iterations,
+    and $\theta = \\arcsin(\\sqrt{M/N})$
+
     Args:
         num_solutions: Number of solutions to the problem ($M$)
         total_states: Total number of possible states ($N = 2^n$)
@@ -478,9 +484,18 @@ def calculate_grover_iterations(num_solutions: int, total_states: int) -> int:
     angle = math.asin(sqrt_ratio)
     result = math.pi / (4 * angle)
 
+    def probability_of_success(k):
+        return math.sin((2*k+1)*angle)**2
+    
+    p_floor = probability_of_success(math.floor(result))
+    p_ceil = probability_of_success(math.ceil(result))
+
     print(
         f"Debug: M={num_solutions}, N={total_states}, ratio={ratio:.3f}, "
-        f"angle={angle:.3f}, result={result:.3f}, floor={math.floor(result)}, round={round(result)}"
+        f"angle={angle:.3f}, result={result:.3f}, floor={math.floor(result)} : {p_floor:.3f}, round={math.ceil(result)} : {p_ceil:.3f}"
     )
 
-    return round(result)
+    if p_ceil > p_floor:
+        return math.ceil(result)
+    
+    return math.floor(result)

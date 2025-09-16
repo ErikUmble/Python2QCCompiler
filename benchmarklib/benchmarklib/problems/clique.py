@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 import networkx as nx
 import numpy as np
 
-from .. import BaseTrial, BenchmarkDatabase, ProblemInstance
+from ..core import BaseTrial, BenchmarkDatabase, ProblemInstance
 
 
 class CliqueProblem(ProblemInstance):

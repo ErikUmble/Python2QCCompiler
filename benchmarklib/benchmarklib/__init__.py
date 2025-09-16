@@ -12,6 +12,7 @@ from .problems import (
 # New synthesis benchmarking imports
 from .compilers import (
     ClassiqCompiler,
+    CompileType,
     SynthesisBenchmark,
     SynthesisCompiler,
     SynthesisResult,

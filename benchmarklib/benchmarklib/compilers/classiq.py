@@ -15,8 +15,9 @@ from classiq import (
 )
 from qiskit import QuantumCircuit
 
-from .. import CliqueProblem, ProblemInstance
 from .base import SynthesisCompiler
+from ..core import ProblemInstance
+from ..problems import CliqueProblem
 
 logger = logging.getLogger("benchmarklib.compiler.classiq")
 

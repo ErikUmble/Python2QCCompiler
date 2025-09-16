@@ -4,12 +4,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from .. import (
-    BenchmarkDatabase,
     ClassiqCompiler,
     SynthesisCompiler,
     TruthTableCompiler,
     XAGCompiler,
 )
+from ..core import BenchmarkDatabase
 
 
 def get_probability_data(
