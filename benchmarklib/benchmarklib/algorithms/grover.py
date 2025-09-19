@@ -20,7 +20,8 @@ from typing import Dict, Optional
 
 import qiskit
 from qiskit import transpile
-from qiskit.circuit.library import grover_operator
+from qiskit.circuit.library import grover_operator, QFT
+from qiskit.transpiler import generate_preset_pass_manager
 from qiskit.providers import Backend
 from qiskit_aer import AerSimulator
 
@@ -452,6 +453,73 @@ class GroverRunner:
             "circuits_collected": len(self._batch_circuits),
             "jobs_submitted": self._batch_job_count,
         }
+    
+
+def count_solutions(oracle: qiskit.QuantumCircuit, n: int, backend: Optional[Backend] = None):
+    """
+    Estimates the number of solutions to f(x)=1 using Quantum Phase Estimation. 
+
+    Args:
+        oracle: Oracle circuit for the problem in U_f or phase oracle form
+        n: Number of input qubits (excluding any ancilla/result qubits)
+        backend: Backend for execution (if None, uses AerSimulator)
+
+    Returns:
+        Tuple of (estimated number of solutions f(x)=1, phase angle)
+
+    """
+    # Assume Uf mode (can change this to be a function argument to toggle for a phase oracle)
+    uf_mode = True
+
+    counting_qubits = n
+    counting_circuit = qiskit.QuantumCircuit(counting_qubits + oracle.num_qubits, counting_qubits)
+    grover_op = grover_operator(oracle, reflection_qubits=range(n))
+    
+    counting_circuit.h(range(counting_qubits))
+    counting_circuit.h(range(counting_qubits, counting_qubits + n))
+
+    # initialize the result qubit to H |1> for phase oracle if uf_mode
+    if uf_mode:
+        counting_circuit.x(counting_qubits + n)
+        counting_circuit.h(counting_qubits + n)
+        
+    for i in range(counting_qubits):
+        power = 2**i
+        controlled_grover = grover_op.power(power).control()
+        counting_circuit.append(controlled_grover.to_instruction(),
+                            [i] + list(range(counting_qubits, counting_qubits + oracle.num_qubits)))
+    counting_circuit.append(QFT(counting_qubits, do_swaps=False).inverse(), range(counting_qubits))
+    counting_circuit.measure(range(counting_qubits), range(counting_qubits))
+
+    logger.info("Counting circuit constructed")
+
+    if backend is None:
+        simulator = AerSimulator()
+        pass_manager = generate_preset_pass_manager(optimization_level=1, backend=simulator)
+        counting_circuit = pass_manager.run(counting_circuit)
+        result = simulator.run(counting_circuit,shots=10**4).result()
+        counts = result.get_counts()
+    else:
+        qc_transpiled = qiskit.transpile(counting_circuit, backend)
+        sampler = Sampler(backend)
+        logger.info(f"Submitting counting job to backend {backend.name()}")
+        job = sampler.run([qc_transpiled], shots=10**4)
+        result = job.result()[0]
+        counts = result.data.c.get_counts()
+
+    # extract the phase angle based on the most frequent counts measured
+    output, count = max(counts.items(), key=lambda x: x[1])
+    measured_value = int(output, 2)
+
+    if measured_value > 2**(counting_qubits-1):
+        # handle wrap-around
+        measured_value = 2**counting_qubits - measured_value
+    
+    phase = measured_value / (2**counting_qubits)
+
+    N = 2**n
+    m = N * (1 - math.cos(2 * math.pi * phase)) / 2
+    return m, phase
 
 
 # Utility functions for common operations
