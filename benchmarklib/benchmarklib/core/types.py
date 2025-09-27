@@ -186,7 +186,7 @@ class BaseTrial(ABC):
 
     Attributes:
         trial_id: Database primary key (None for unsaved trials)
-        instance_id: Foreign key to problem_instances table
+        problem_instance: ProblemInstance related to this trial by foreign key
         compiler_name: How the quantum circuit was compiled
         job_id: IBM Quantum job identifier
         job_pub_idx: Index within the job for this circuit
@@ -198,7 +198,7 @@ class BaseTrial(ABC):
 
     def __init__(
         self,
-        instance_id: int,
+        problem_instance: ProblemInstance,
         compiler_name: str,
         job_id: Optional[str] = None,
         job_pub_idx: int = 0,
@@ -223,7 +223,6 @@ class BaseTrial(ABC):
             **trial_params: Trial-specific parameters (vary by problem type)
         """
         self.trial_id = trial_id
-        self.instance_id = instance_id
         self.compiler_name = compiler_name
         self.job_id = job_id
         self.job_pub_idx = job_pub_idx
@@ -232,8 +231,11 @@ class BaseTrial(ABC):
         self.trial_params = trial_params
         self.created_at = created_at or datetime.now().isoformat()
 
-        # Cache for problem instance (loaded on demand)
-        self._problem_instance: Optional[ProblemInstance] = None
+        self._problem_instance = problem_instance
+
+    @property
+    def instance_id(self) -> int:
+        return self._problem_instance.instance_id
 
     @property
     def is_pending(self) -> bool:

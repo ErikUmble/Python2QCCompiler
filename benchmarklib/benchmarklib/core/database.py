@@ -224,6 +224,7 @@ class BenchmarkDatabase:
     def find_problem_instances(
         self,
         size_filters: Optional[Dict[str, Any]] = None,
+        problem_data_filters: Optional[Dict[str, Any]] = None,
         limit: Optional[int] = None,
         choose_untested: bool = False,
         random_sample: bool = False,
@@ -271,7 +272,10 @@ class BenchmarkDatabase:
             params = []
 
         # Apply size filters
-        if size_filters:
+        if size_filters or problem_data_filters:
+            size_filters = size_filters or {}
+            problem_data_filters = problem_data_filters or {}
+            
             where_conditions = []
             for key, value in size_filters.items():
                 if choose_untested:
@@ -281,6 +285,17 @@ class BenchmarkDatabase:
                 else:
                     where_conditions.append(
                         f"JSON_EXTRACT(size_metrics, '$.{key}') = ?"
+                    )
+                params.append(value)
+
+            for key, value in problem_data_filters.items():
+                if choose_untested:
+                    where_conditions.append(
+                        f"JSON_EXTRACT(p.problem_data, '$.{key}') = ?"
+                    )
+                else:
+                    where_conditions.append(
+                        f"JSON_EXTRACT(problem_data, '$.{key}') = ?"
                     )
                 params.append(value)
 
@@ -440,29 +455,31 @@ class BenchmarkDatabase:
         params = []
 
         base_query = """
-            SELECT trial_id, instance_id, compiler_name, job_id, job_pub_idx,
-                   counts, simulation_counts, trial_params, created_at
-            FROM trials
+            SELECT t.trial_id, t.instance_id, t.compiler_name, t.job_id, t.job_pub_idx,
+                   t.counts, t.simulation_counts, t.trial_params, t.created_at,
+                   p.problem_data
+            FROM trials t
+            JOIN problem_instances p ON t.instance_id = p.instance_id
         """
 
         if trial_id is not None:
-            query_parts.append("trial_id = ?")
+            query_parts.append("t.trial_id = ?")
             params.append(trial_id)
 
         if instance_id is not None:
-            query_parts.append("instance_id = ?")
+            query_parts.append("t.instance_id = ?")
             params.append(instance_id)
 
         if job_id is not None:
-            query_parts.append("job_id = ?")
+            query_parts.append("t.job_id = ?")
             params.append(job_id)
 
         if compiler_name is not None:
-            query_parts.append("compiler_name= ?")
+            query_parts.append("t.compiler_name = ?")
             params.append(compiler_name)
 
         if not include_pending:
-            query_parts.append("counts != ''")
+            query_parts.append("t.counts != ''")
 
         # Build final query
         query = base_query
@@ -477,6 +494,7 @@ class BenchmarkDatabase:
             cursor.execute(query, params)
             rows = cursor.fetchall()
 
+
         # Reconstruct trial objects
         trials = []
         for row in rows:
@@ -490,6 +508,7 @@ class BenchmarkDatabase:
                 sim_counts_json,
                 trial_params_json,
                 created_at,
+                problem_data_json,
             ) = row
 
             # Deserialize JSON fields
@@ -497,9 +516,15 @@ class BenchmarkDatabase:
             sim_counts = json.loads(sim_counts_json) if sim_counts_json else None
             params_dict = json.loads(trial_params_json)
 
+
+            problem_data = json.loads(problem_data_json)
+            problem_instance = self.problem_class.from_dict(
+                data=problem_data, instance_id=instance_id
+            )
+
             # Create trial object
             trial = self.trial_class(
-                instance_id=instance_id,
+                problem_instance=problem_instance,
                 compiler_name=compiler_name,
                 job_id=job_id,
                 job_pub_idx=job_pub_idx,

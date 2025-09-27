@@ -240,7 +240,6 @@ class GroverRunner:
                     f"Skipping existing trial: Problem {problem_instance.instance_id}, "
                     f"{compiler.name}, {grover_iterations} iterations"
                 )
-                print("HERE")
                 return existing_trials[0]
 
         # Handle shots override
@@ -273,7 +272,7 @@ class GroverRunner:
             trial_params = {"grover_iterations": grover_iterations, **oracle_kwargs}
 
             trial = self.db_manager.trial_class(
-                instance_id=problem_instance.instance_id,
+                problem_instance=problem_instance,
                 compiler_name=compiler.name,
                 job_id=None,  # Will be set during submit_job()
                 job_pub_idx=-1,  # Will be set during submit_job()
@@ -308,7 +307,7 @@ class GroverRunner:
 
             # Create failed trial
             trial = self.db_manager.trial_class(
-                instance_id=problem_instance.instance_id,
+                problem_instance=problem_instance,
                 compiler_name=compiler.name,
                 grover_iterations=grover_iterations,
                 **oracle_kwargs,

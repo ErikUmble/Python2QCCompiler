@@ -136,7 +136,7 @@ class SynthesisTrial(BaseTrial):
 
     def __init__(
         self,
-        instance_id: int,
+        problem_instance: ProblemInstance,
         job_id: Optional[str] = None,
         job_pub_idx: int = 0,
         counts: Optional[Dict[str, Any]] = None,
@@ -227,7 +227,7 @@ class SynthesisTrial(BaseTrial):
 
         # Call parent constructor with standard parameters
         super().__init__(
-            instance_id=instance_id,
+            problem_instance=problem_instance,
             compiler_name=compiler_name,
             job_id=job_id,
             job_pub_idx=job_pub_idx,
@@ -411,7 +411,7 @@ class SynthesisBenchmark:
                 # Save to database
                 if self.save_to_db:
                     trial = SynthesisTrial(
-                        instance_id=problem.instance_id,
+                        problem_instance=problem,
                         compiler_name=compiler.name,
                         synthesis_result=result,
                         **kwargs,
