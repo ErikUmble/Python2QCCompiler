@@ -21,6 +21,10 @@ from .compilers import (
     compare_compilers,
 )
 
+from .runners import (
+    BatchQueue,
+)
+
 from . import pipeline
 
 from . import databases
