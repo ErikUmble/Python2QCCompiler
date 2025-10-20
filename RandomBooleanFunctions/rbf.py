@@ -1,10 +1,25 @@
-from typing import List, Tuple
-from benchmarklib import ProblemInstance, CompileType, BaseTrial, BenchmarkDatabase
+import logging
+from typing import Iterable, List, Tuple, Dict, Any, Union, Optional, ClassVar, Type
+import qiskit
+from qiskit.providers import Backend
+from qiskit import QuantumCircuit, transpile
+import random
+
+from sqlalchemy import Column, Integer, String, JSON, ForeignKey, Text, Float, DateTime, LargeBinary, Index, select, func
+from sqlalchemy.orm import declarative_base, Mapped, relationship, mapped_column, reconstructor, declared_attr
+
 from tweedledum.bool_function_compiler import circuit_input, QuantumCircuitFunction
 from tweedledum import BitVec
-from typing import List, Tuple, Dict, Any, Union, Optional
-from qiskit import QuantumCircuit
-import random
+
+from benchmarklib import BaseProblem, CompileType, BaseTrial, BenchmarkDatabase, TrialCircuitMetricsMixin
+from benchmarklib import BatchQueue
+from benchmarklib.compilers import SynthesisCompiler
+
+# temporary during db migration
+from benchmarklib.core.types import _ProblemInstance, _BaseTrial
+
+
+logger = logging.getLogger("RandomBooleanFunctions.rbf")
 
 operators = ("and", "or", "not", "^")
 
@@ -57,17 +72,208 @@ def get_circuit_input_function(statement, variables, name="f"):
     """
     # convert variables to BitVec indices
     var_map = {var: f"vars[{i}]" for i, var in enumerate(variables)}
-    for var, replacement in var_map.items():
-        statement = statement.replace(var, replacement)
-        
+
+    # replace variables with their BitVec index notation
+    # start with longest variable names to avoid partial replacements
+    for var in sorted(variables, key=len, reverse=True):
+        statement = statement.replace(var, var_map[var])
+
     return f"""
 @circuit_input(vars=BitVec({len(variables)}))
 def {name}() -> BitVec(1):
     return {statement}
     """
 
+class RandomBooleanFunction(BaseProblem):
+    __tablename__ = "random_boolean_functions"
+    TrialClass: ClassVar[Type[BaseTrial]] = "RandomBooleanFunctionTrial"
 
-class RandomBooleanFunction(ProblemInstance):
+    num_vars: Mapped[int]
+    complexity: Mapped[int]
+    statement: Mapped[str] = mapped_column(Text)
+
+    @declared_attr
+    def __table_args__(cls):
+        base_args = super().__table_args__ if hasattr(super(), '__table_args__') else ()
+
+        return base_args + (
+            Index('ix_num_vars_complexity', 'num_vars', 'complexity'),
+        )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.vars = get_variables(self.num_vars)
+
+    @reconstructor
+    def init_on_load(self):
+        # __init__ is bypassed when loading from the database, so we initialize extra class variables here
+        self.vars = get_variables(self.num_vars)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Converts the RandomBooleanFunction instance to a JSON-serializable dictionary."""
+        return {
+            "statement": self.statement,
+            "num_vars": self.num_vars,
+            "complexity": self.complexity,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any], instance_id: Optional[int]) -> "RandomBooleanFunction":
+        """Creates a RandomBooleanFunction instance from a dictionary."""
+        return cls(
+            statement=data.get("statement"),
+            num_vars=data.get("num_vars"),
+            complexity=data.get("complexity"),
+            instance_id=instance_id,
+        )
+
+    def get_problem_size(self) -> Dict[str, int]:
+        return {'num_vars': self.num_vars, 'complexity': self.complexity}
+    
+    def number_of_input_bits(self) -> int:
+        return self.num_vars
+
+    def verify(self, inpt: BitVec) -> bool:
+        """
+        Checks whether or not inpt satisfies this problem
+        Returns:
+            True if inpt satisfies this problem, False otherwise
+        """
+        if len(inpt) != self.num_vars:
+            raise ValueError("inpt size should match num_vars")
+
+        input_variables = {}
+        for i, var in enumerate(self.vars):
+            input_variables[var] = int(inpt[i])
+        return eval(self.statement, {}, input_variables)
+
+    def oracle(self, compile_type: CompileType) -> QuantumCircuit:
+        import tempfile
+        import importlib.util
+        import os
+
+        temp_function = get_circuit_input_function(self.statement, self.vars, name="temporary_function")
+        required_imports = """
+from tweedledum import BitVec
+from tweedledum.bool_function_compiler import circuit_input
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            module_name = "temp_boolean_func"
+            file_path = os.path.join(temp_dir, f"{module_name}.py")
+
+            with open(file_path, "w") as f:
+                f.write(required_imports)
+                f.write(temp_function)
+
+            spec = importlib.util.spec_from_file_location(module_name, file_path)
+            temp_module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(temp_module)
+
+            classical_function = QuantumCircuitFunction(temp_module.temporary_function)
+        
+        if compile_type == CompileType.CLASSICAL_FUNCTION:
+            return classical_function.truth_table_synthesis()
+        
+        elif compile_type == CompileType.XAG:
+            return classical_function.synthesize_quantum_circuit(remove_unused_inputs=False)
+        
+        raise ValueError(f"{compile_type} not yet supported for RandomBooleanFunction")
+    
+
+class RandomBooleanFunctionTrial(TrialCircuitMetricsMixin, BaseTrial):
+    __tablename__ = "random_boolean_function_trials"
+    ProblemClass = RandomBooleanFunction
+
+    input_state: Mapped[str] = mapped_column(String(255))  # can make larger as quantum computers scale up
+
+    @property
+    def expected_result(self):
+
+        if self.input_state == "-1":
+            return None
+        
+        input_variables = {}
+        problem = self.problem
+        for i, var in enumerate(problem.vars):
+            input_variables[var] = int(self.input_state[i])
+        return eval(problem.statement, {}, input_variables)
+
+    @property
+    def exact_match_rate(self):
+        if self.is_failed:
+            return 0.0
+        
+        if self.counts is None:
+            raise ValueError("Counts must be set before calculating exact match rate. Use get_counts() or get_counts_async() to update the counts.")
+        
+        successes = self.counts.get(self.total_expected_results(), 0)
+        return successes / sum(self.counts.values())
+    
+    @property
+    def mean_hamming_distance(self):
+        """
+        the mean hamming distance between the expected result and the measured results per shot, per qubit
+        """
+
+        if self.is_failed:
+            return float(self._problem_instance.num_vars + 1)  # max hamming distance
+    
+        if self.counts is None:
+            raise ValueError("Counts must be set before calculating mean hamming distance. Use get_counts() or get_counts_async() to update the counts.")
+        
+        total_distance = 0
+        expected = self.total_expected_results()
+        for result, count in self.counts.items():
+            total_distance += hamming_distance(expected, result) * count
+
+        return total_distance / sum(self.counts.values())
+
+    @property
+    def result_qubit_success_rate(self):
+        """
+        the rate of success for the result qubit of Uf
+        """
+        if self.is_failed:
+            return 0.0
+        
+        if self.counts is None:
+            raise ValueError("Counts must be set before calculating correct result qubit rate. Use get_counts() or get_counts_async() to update the counts.")
+        
+        correct_result_count = 0
+        expected = "1" if self.expected_result else "0"
+        result_idx = self.problem.num_vars # result qubit is the qubit which immediately follows the input qubits
+        for result, count in self.counts.items():
+            if result[result_idx] == expected:
+                correct_result_count += count
+
+        return correct_result_count / sum(self.counts.values())
+
+    def calculate_expected_success_rate(
+            self,
+            db_manager: Optional[BenchmarkDatabase] = None,
+    ):
+        # expected success rate is 1, as this kind of trial tests
+        # the accuracy of pure state (expected) output given pure state input
+        return 1
+    
+    def total_expected_results(self):
+        """ 
+        Returns the expected binary string to be measured after the circuit is run
+        Note that due to little-endian encoding of the counts, the first bit is the result bit
+        and the input bits are in reverse order
+        """
+        result_bit = "1" if self.expected_result else "0"
+        return result_bit + self.input_state[::-1]
+    
+    def calculate_success_rate(
+        self,
+        db_manager: Optional[BenchmarkDatabase] = None,
+    ) -> float:
+        # using exact match rate across all qubits as the success metric
+        return self.exact_match_rate
+    
+
+class _RandomBooleanFunction(_ProblemInstance):
     def __init__(
         self,
         statement: str,
@@ -124,6 +330,20 @@ class RandomBooleanFunction(ProblemInstance):
     def number_of_input_bits(self) -> int:
         return self.num_vars
 
+    def verify(self, inpt: BitVec) -> bool:
+        """
+        Checks whether or not inpt satisfies this problem
+        Returns:
+            True if inpt satisfies this problem, False otherwise
+        """
+        if len(inpt) != self.num_vars:
+            raise ValueError("inpt size should match num_vars")
+
+        input_variables = {}
+        for i, var in enumerate(self.vars):
+            input_variables[var] = int(inpt[i])
+        return eval(self.statement, {}, input_variables)
+
     def oracle(self, compile_type: CompileType) -> QuantumCircuit:
         import tempfile
         import importlib.util
@@ -152,12 +372,114 @@ from tweedledum.bool_function_compiler import circuit_input
             return classical_function.truth_table_synthesis()
         
         elif compile_type == CompileType.XAG:
-            return classical_function.synthesize_quantum_circuit()
+            return classical_function.synthesize_quantum_circuit(remove_unused_inputs=False)
         
         raise ValueError(f"{compile_type} not yet supported for RandomBooleanFunction")
+    
+
+def run_rbf_benchmark(db_manager: BenchmarkDatabase, compiler: "SynthesisCompiler", backend: Backend, num_vars_iter: Iterable[int], complexity_iter: Iterable[int], num_functions: int = 10, trials_per_instance: int = 5, shots: int = 10**3, max_problems_per_job: Optional[int] = None):
+    """
+    Run benchmarks for random boolean functions with varying number of variables and complexity.
+
+    Args:
+        db_manager: BenchmarkDatabase instance for storing results
+        num_vars_iter: num_vars range
+        complexity_iter: complexity range
+        num_functions: Number of random functions to create trials for from each (num_vars, complexity) pair
+        trials_per_instance: Number of trials (random input states) to run per problem instance (rbf function)
+        shots: Number of shots to run per trial
+        max_problems_per_job: Maximum number of problems to include in each job submission to the backend (set this to 1 to force trial transpilation and submission to the backend before compiling the next problem)
+    """
+    with BatchQueue(db_manager, backend=backend, shots=shots) as q:
+        pending_trial_problem_count = 0
+        for num_vars in num_vars_iter:
+            for complexity in complexity_iter:
+                logger.info(f"Benchmarking functions with num_vars={num_vars}, complexity={complexity}")
+                # check if we already have enough data for this size
+                count = db_manager.query(
+                    select(func.count(func.distinct(db_manager.problem_class.id)))
+                    .select_from(db_manager.problem_class)
+                            .join(db_manager.trial_class, db_manager.trial_class.problem_id == db_manager.problem_class.id)
+                            .where(
+                                db_manager.trial_class.compiler_name == compiler.name,
+                                db_manager.problem_class.num_vars == num_vars,
+                                db_manager.problem_class.complexity == complexity
+                        )
+                    )[0]
+                if count >= num_functions:
+                    logger.info(f"Skipping (num_vars={num_vars}, complexity={complexity}) -- already have {count} instances")
+                    continue
+
+                problem_instances = db_manager.find_problem_instances(
+                    num_vars=num_vars,
+                    complexity=complexity,
+                    choose_untested=True,
+                    compiler_name=compiler.name,
+                    random_sample=True,
+                    limit=num_functions-count
+                )
+                for problem_instance in problem_instances:
+                    logger.info(f"Benchmarking with problem {problem_instance.statement}")
+                    oracle = problem_instance.oracle(compiler.name)  # TODO: should update this to use new compiler API
+                    for _ in range(trials_per_instance):
+                        input_state = ''.join(random.choice('01') for _ in range(num_vars))
+                        qc = qiskit.QuantumCircuit(max(oracle.num_qubits, num_vars + 1), num_vars + 1)
+                        for i, bit in enumerate(input_state):
+                            if bit == '1':
+                                qc.x(qc.qubits[i])
+
+                        qc.compose(oracle, inplace=True)
+                        qc.measure(range(num_vars + 1), range(num_vars + 1))
+
+                        trial = RandomBooleanFunctionTrial(
+                            problem=problem_instance,
+                            compiler_name=compiler.name,
+                            input_state=input_state,
+                        )
+                        transpiled_qc = transpile(qc, backend=backend)
+                        q.enqueue(trial, transpiled_qc, run_simulation=(qc.num_qubits <= 10))
+
+                    pending_trial_problem_count += 1
+                    if max_problems_per_job and pending_trial_problem_count >= max_problems_per_job:
+                        q.submit_tasks()
+                        pending_trial_problem_count = 0
 
 
-class RandomBooleanFunctionTrial(BaseTrial):
+def generate_rbf_problems(db_manager: BenchmarkDatabase, num_vars_iter: Iterable[int], complexity_iter: Iterable[int], num_functions: int = 10):
+    """
+    Generate and store random boolean function problems in the database.
+
+    Args:
+        db_manager: BenchmarkDatabase instance for storing results
+        num_vars_iter: num_vars range
+        complexity_iter: complexity range
+        num_functions: Number of random functions to create from each (num_vars, complexity) pair
+    """
+    for num_vars in num_vars_iter:
+        for complexity in complexity_iter:
+            logger.info(f"Generating functions with num_vars={num_vars}, complexity={complexity}")
+            existing_count = db_manager.query(
+                select(func.count(db_manager.problem_class.id))
+                .where(
+                    db_manager.problem_class.num_vars == num_vars,
+                    db_manager.problem_class.complexity == complexity
+                )
+            )[0]
+            if existing_count >= num_functions:
+                logger.info(f"Skipping (num_vars={num_vars}, complexity={complexity}) -- already have {existing_count} instances")
+                continue
+
+            statements = set()
+            while len(statements) < (num_functions - existing_count):
+                statement, _ = get_random_statement(num_vars, complexity)
+                statements.add(statement)
+
+            for statement in statements:
+                problem_instance = RandomBooleanFunction(statement=statement, num_vars=num_vars, complexity=complexity)
+                db_manager.save_problem_instance(problem_instance)
+
+
+class _RandomBooleanFunctionTrial(_BaseTrial):
 
     @property
     def input_state(self) -> str:
@@ -167,6 +489,10 @@ class RandomBooleanFunctionTrial(BaseTrial):
 
     @property
     def expected_result(self):
+
+        if self.input_state == "-1":
+            return None
+        
         input_variables = {}
         problem = self.get_problem_instance()
         for i, var in enumerate(problem.vars):
@@ -177,8 +503,8 @@ class RandomBooleanFunctionTrial(BaseTrial):
     def exact_match_rate(self):
         if self.counts is None:
             raise ValueError("Counts must be set before calculating exact match rate. Use get_counts() or get_counts_async() to update the counts.")
-        if self.counts.get('-1') is not None:
-            return 0
+        if self.is_failed:
+            return 0.0
         successes = self.counts.get(self.total_expected_results(), 0)
         return successes / sum(self.counts.values())
     
@@ -190,12 +516,35 @@ class RandomBooleanFunctionTrial(BaseTrial):
         if self.counts is None:
             raise ValueError("Counts must be set before calculating mean hamming distance. Use get_counts() or get_counts_async() to update the counts.")
         
+        if self.is_failed:
+            return float(self._problem_instance.num_vars + 1)  # max hamming distance
+        
         total_distance = 0
         expected = self.total_expected_results()
         for result, count in self.counts.items():
             total_distance += hamming_distance(expected, result) * count
 
         return total_distance / sum(self.counts.values())
+
+    @property
+    def result_qubit_success_rate(self):
+        """
+        the rate of success for the result qubit of Uf
+        """
+        if self.counts is None:
+            raise ValueError("Counts must be set before calculating correct result qubit rate. Use get_counts() or get_counts_async() to update the counts.")
+        
+        if self.is_failed:
+            return 0.0
+        
+        correct_result_count = 0
+        expected = "1" if self.expected_result else "0"
+        result_idx = self._problem_instance.num_vars # result qubit is the qubit which immediately follows the input qubits
+        for result, count in self.counts.items():
+            if result[result_idx] == expected:
+                correct_result_count += count
+
+        return correct_result_count / sum(self.counts.values())
 
     def calculate_expected_success_rate(
             self,
@@ -221,7 +570,7 @@ class RandomBooleanFunctionTrial(BaseTrial):
         # TODO: implement
         return 0
     
-    def get_problem_instance(self, db_manager: Optional["BenchmarkDatabase"] = None) -> ProblemInstance:
+    def get_problem_instance(self, db_manager: Optional["BenchmarkDatabase"] = None) -> _ProblemInstance:
         if self._problem_instance is not None:
             return self._problem_instance
         
