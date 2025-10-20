@@ -12,12 +12,12 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional, Type, TypeVar, Union
 
-from .. import ProblemInstance
+from benchmarklib.core.types import BaseProblem
 
 logger = logging.getLogger("benchmarklib.databases")
 
 # Type variable for problem instances
-T = TypeVar("T", bound=ProblemInstance)
+T = TypeVar("T", bound=BaseProblem)
 
 
 # ============================================================================
@@ -36,7 +36,7 @@ class ProblemStorage:
     def __init__(
         self,
         db_path: Union[str, Path],
-        problem_class: Type[ProblemInstance],
+        problem_class: Type[BaseProblem],
         read_only: bool = False,
     ):
         """
@@ -116,7 +116,7 @@ class ProblemStorage:
 
             conn.commit()
 
-    def save(self, problem: ProblemInstance) -> int:
+    def save(self, problem: BaseProblem) -> int:
         """
         Save a problem instance to storage.
 
@@ -186,7 +186,7 @@ class ProblemStorage:
 
         return problem.instance_id
 
-    def get(self, instance_id: int) -> ProblemInstance:
+    def get(self, instance_id: int) -> BaseProblem:
         """
         Get a problem instance by ID.
 
@@ -213,7 +213,7 @@ class ProblemStorage:
             problem_data = json.loads(row["problem_data"])
             return self.problem_class.from_dict(problem_data, instance_id=instance_id)
 
-    def find(self, limit: Optional[int] = None, **filters) -> List[ProblemInstance]:
+    def find(self, limit: Optional[int] = None, **filters) -> List[BaseProblem]:
         """
         Find problem instances matching filters.
 
@@ -251,7 +251,7 @@ class ProblemStorage:
 
         return problems
 
-    def random_sample(self, limit: int = 1, **filters) -> List[ProblemInstance]:
+    def random_sample(self, limit: int = 1, **filters) -> List[BaseProblem]:
         """
         Get random sample of problems.
 

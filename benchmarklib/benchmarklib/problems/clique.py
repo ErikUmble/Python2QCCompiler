@@ -7,10 +7,11 @@ from typing import Any, Dict, List, Optional
 import networkx as nx
 import numpy as np
 
-from ..core import BaseTrial, BenchmarkDatabase, ProblemInstance
+from ..core import BaseTrial, BenchmarkDatabase, BaseProblem
+from ..core.types import _ProblemInstance, _BaseTrial
 
 
-class CliqueProblem(ProblemInstance):
+class CliqueProblem(_ProblemInstance):
     def __init__(
         self,
         graph: str,
@@ -185,7 +186,7 @@ class CliqueProblem(ProblemInstance):
         return self.clique_counts[clique_size]
 
 
-class CliqueTrial(BaseTrial):
+class CliqueTrial(_BaseTrial):
     """Trial for clique detection using Grover's algorithm."""
 
     def calculate_expected_success_rate(

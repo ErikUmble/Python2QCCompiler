@@ -16,7 +16,7 @@ from qiskit_ibm_runtime import SamplerV2 as Sampler
 from qiskit_ibm_runtime.options import dynamical_decoupling_options
 from qiskit_ibm_runtime.exceptions import IBMRuntimeError
 
-from ..core import BaseTrial, BenchmarkDatabase, ProblemInstance
+from ..core import BaseTrial, BenchmarkDatabase, BaseProblem
 from ..compilers import SynthesisCompiler
 
 logger = logging.getLogger("benchmarklib.runners.queue")
@@ -29,12 +29,19 @@ class Task:
 
 class BatchQueue:
     """
-    This class provides batch processing management for submitting circuits to a Quantum Computer or Simulator backend.
+    This class provides batch processing management for submitting 
+    pre-transpiled circuits to a Quantum Computer or Simulator backend.
     It provides an adaptive job submission strategy which seeks to optimize throughput by submitting many circuits per job,
     while decreasing job size exponentially until this succeeds.
 
-    Simply create a BatchQueue, add tasks using add(), and call finish_batch() when done. Jobs will automatically be submitted
-    when the number of pending tasks exceeds the adaptively managed job size.
+    Jobs will automatically be submitted
+    when the number of pending tasks exceeds the adaptively managed job size. Call submit_tasks() to manually submit all pending tasks.
+    Use BatchQueue as a context manager to ensure all jobs are submitted before the context exits.
+
+    Example usage:
+    with BatchQueue(db_manager, backend) as batch_queue:
+        for trial, circuit in trials_and_circuits:
+            batch_queue.enqueue(trial, circuit, run_simulation=True)
     """
     def __init__(
             self, 
@@ -42,36 +49,31 @@ class BatchQueue:
             backend: Backend,
             max_job_size: int = 100,
             shots: int = 1024,
-            transpile_kwargs: Optional[Dict] = {},
             sampler_options: Optional[SamplerOptions] = None,
-            run_simulation: bool = False
         ):
             self.db_manager = db_manager
             self.backend = backend
             self.max_job_size = max_job_size
             self.job_size = max_job_size
-            self.transpile_kwargs = transpile_kwargs
             self.sampler_options = sampler_options if sampler_options else SamplerOptions()
             self.shots = shots
-            self.run_simulation = run_simulation
 
             # state management
             self._batch_context = None
             self._batch_job_count = 0
             self._tasks = []
 
-    def enqueue(self, trial: BaseTrial, circuit: qiskit.QuantumCircuit):
+    def enqueue(self, trial: BaseTrial, circuit: qiskit.QuantumCircuit, run_simulation: bool = False):
         """
         Add a trial with associated circuit to the batch queue. If simulation is enabled, this simulates the circuit immediately.
         """
         task = Task(trial, circuit)
         self._tasks.append(task)
 
-        if self.run_simulation and task.trial.simulation_counts is None:
-            task.trial.simulation_counts = run_simulation(
+        if run_simulation:
+            task.trial.simulation_counts = simulate(
                 circuit,
                 shots=self.shots,
-                transpile_kwargs=self.transpile_kwargs
             )
             self.db_manager.save_trial(task.trial)
 
@@ -137,20 +139,12 @@ class BatchQueue:
         
         circuits = [task.circuit for task in tasks]
 
-        # Transpile circuits
-        logger.debug(f"Transpiling {len(circuits)} circuits...")
-        transpiled_circuits = transpile(
-            circuits,
-            backend=self.backend,
-            **self.transpile_kwargs,
-        )
-
         # Submit job within batch context
         sampler = Sampler(mode=self._batch_context, options=self.sampler_options)
 
         try:
             # Submit job
-            job = sampler.run(transpiled_circuits, shots=self.shots)
+            job = sampler.run(circuits, shots=self.shots)
             job_id = job.job_id()
             return job_id
         
@@ -212,9 +206,16 @@ class BatchQueue:
             # create another job_tasks of at most the same size as the previous
             job_tasks = self._tasks[:len(job_tasks)]
 
+    def __enter__(self):
+        self.start_batch()
+        return self
+    
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.finish_batch()
 
-def run_simulation(
-        circuit: qiskit.QuantumCircuit, simulator: Optional[AerSimulator] = None, max_circuit_depth: Optional[int] = None, shots: int = 10**3, transpile_kwargs: Optional[Dict] = {}
+
+def simulate(
+        circuit: qiskit.QuantumCircuit, simulator: Optional[AerSimulator] = None, max_circuit_depth: Optional[int] = None, shots: int = 10**3
     ) -> Optional[Dict[str, int]]:
     """
     Run classical simulation.
@@ -229,23 +230,16 @@ def run_simulation(
     simulator = simulator if simulator else AerSimulator()
 
     try:
-        # Transpile for simulator
-        qc = transpile(
-            circuit,
-            simulator,
-            **transpile_kwargs,
-        )
-
         # Check complexity limits
         if (
             max_circuit_depth
-            and qc.depth() > max_circuit_depth
+            and circuit.depth() > max_circuit_depth
         ):
-            logger.warning(f"Circuit too deep: {qc.depth()}")
+            logger.warning(f"Circuit too deep: {circuit.depth()}")
             return None
 
         # Run simulation
-        result = simulator.run(qc, shots=shots).result()
+        result = simulator.run(circuit, shots=shots).result()
         counts = result.get_counts()
 
         logger.debug(f"Simulation completed: {len(counts)} unique outcomes")
@@ -258,12 +252,12 @@ def run_simulation(
 
 def run_tasks(
         tasks: Iterable[Task], 
-            db_manager: BenchmarkDatabase, 
-            service: QiskitRuntimeService, 
-            backend: Backend,
-            max_job_size: int = 100,
-            transpile_kwargs: Optional[Dict] = {},
-            sampler_options: Optional[SamplerOptions] = None
+        db_manager: BenchmarkDatabase, 
+        service: QiskitRuntimeService, 
+        backend: Backend,
+        run_simulation: bool = False,
+        max_job_size: int = 100,
+        sampler_options: Optional[SamplerOptions] = None
     ):
 
     batch_queue = BatchQueue(
@@ -271,11 +265,10 @@ def run_tasks(
         service=service,
         backend=backend,
         max_job_size=max_job_size,
-        transpile_kwargs=transpile_kwargs,
         sampler_options=sampler_options
     )
 
     for task in tasks:
-        batch_queue.add(task)
+        batch_queue.add(task, run_simulation=run_simulation)
 
     batch_queue.finish_batch()

@@ -10,13 +10,14 @@ from typing import Any, Dict, List, Optional, TypeVar
 
 import networkx as nx
 
-from .. import CliqueProblem, ProblemInstance
+from .. import CliqueProblem, BaseProblem
+from benchmarklib.core.types import _ProblemInstance
 from .problem_storage import ProblemStorage
 
 logger = logging.getLogger("benchmarklib.databases.clique_db")
 
 # Type variable for problem instances
-T = TypeVar("T", bound=ProblemInstance)
+T = TypeVar("T", bound=_ProblemInstance)
 
 
 class CliqueDatabase(ProblemStorage):

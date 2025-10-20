@@ -30,7 +30,7 @@ from qiskit_ibm_runtime import Batch, QiskitRuntimeService, SamplerOptions
 from qiskit_ibm_runtime import SamplerV2 as Sampler
 from qiskit_ibm_runtime.options import dynamical_decoupling_options
 
-from ..core import BaseTrial, BenchmarkDatabase, ProblemInstance
+from ..core import BaseTrial, BenchmarkDatabase, BaseProblem
 from ..compilers import SynthesisCompiler
 
 logger = logging.getLogger("benchmarklib.algorithms.grover")
@@ -92,37 +92,9 @@ class GroverRunner:
         self, oracle: qiskit.QuantumCircuit, num_vars: int, grover_iterations: int
     ) -> qiskit.QuantumCircuit:
         """
-        Build complete Grover search circuit from oracle.
-
-        Args:
-            oracle: Oracle circuit from problem_instance.oracle()
-            num_vars: Number of search variables
-            grover_iterations: Number of Grover iterations
-
-        Returns:
-            Complete Grover search circuit
+        Alias for build_grover_circuit function.
         """
-        # Build Grover operator
-        grover_op = grover_operator(oracle, reflection_qubits=range(num_vars))
-
-        # Create search circuit
-        search_circuit = qiskit.QuantumCircuit(oracle.num_qubits, num_vars)
-
-        # Initialize ancilla for Uf mode
-        search_circuit.x(num_vars)
-        search_circuit.h(num_vars)
-
-        # Initialize superposition
-        search_circuit.h(range(num_vars))
-
-        # Apply Grover operator
-        if grover_iterations > 0:
-            search_circuit.compose(grover_op.power(grover_iterations), inplace=True)
-
-        # Measure
-        search_circuit.measure(range(num_vars), range(num_vars))
-
-        return search_circuit
+        return build_grover_circuit(oracle, num_vars, grover_iterations)
 
     def run_simulation(
         self, circuit: qiskit.QuantumCircuit
@@ -189,7 +161,7 @@ class GroverRunner:
 
     def run_grover_benchmark(
         self,
-        problem_instance: ProblemInstance,
+        problem_instance: BaseProblem,
         compiler: SynthesisCompiler,
         grover_iterations: int,
         shots: Optional[int] = None,
@@ -452,9 +424,94 @@ class GroverRunner:
             "circuits_collected": len(self._batch_circuits),
             "jobs_submitted": self._batch_job_count,
         }
-    
 
-def count_solutions(oracle: qiskit.QuantumCircuit, n: int, backend: Optional[Backend] = None):
+def build_grover_circuit(
+    oracle: qiskit.QuantumCircuit, num_vars: int, grover_iterations: int
+) -> qiskit.QuantumCircuit:
+    """
+    Build complete Grover search circuit from oracle.
+
+    Args:
+        oracle: Oracle circuit from problem_instance.oracle()
+        num_vars: Number of search variables
+        grover_iterations: Number of Grover iterations
+
+    Returns:
+        Complete Grover search circuit
+    """
+    # Build Grover operator
+    grover_op = grover_operator(oracle, reflection_qubits=range(num_vars))
+
+    # Create search circuit
+    search_circuit = qiskit.QuantumCircuit(oracle.num_qubits, num_vars)
+
+    # Initialize ancilla for Uf mode
+    search_circuit.x(num_vars)
+    search_circuit.h(num_vars)
+
+    # Initialize superposition
+    search_circuit.h(range(num_vars))
+
+    # Apply Grover operator
+    if grover_iterations > 0:
+        search_circuit.compose(grover_op.power(grover_iterations), inplace=True)
+
+    # Measure
+    search_circuit.measure(range(num_vars), range(num_vars))
+
+    return search_circuit  
+
+
+def verify_oracle(oracle: qiskit.QuantumCircuit, num_vars: int, problem: BaseProblem) -> bool:
+    """
+    Verify oracle correctness by checking its action on all basis states.
+
+    Args:
+        oracle: Oracle circuit for the problem in U_f or phase oracle form
+        num_vars: Number of input qubits (excluding any ancilla/result qubits)
+    Returns:
+        True if oracle behaves correctly, False otherwise
+    """
+    if num_vars > 10:
+        logger.warning(f"Attempting to verify a large oracle ({num_vars} qubits). This could be resource-intensive.")
+        
+    print(num_vars, oracle.num_qubits, problem.statement)
+    n = num_vars
+    simulator = AerSimulator()
+    pass_manager = generate_preset_pass_manager(optimization_level=1, backend=simulator)
+    oracle = pass_manager.run(oracle)
+    print(oracle.draw('text'))
+
+    for i in range(2**n):
+        input_state = [(i >> j) & 1 for j in range(n)]
+        qc = qiskit.QuantumCircuit(oracle.num_qubits, n+1)
+        for q in range(n):
+            if input_state[q]:
+                qc.x(q)
+        qc.compose(oracle, inplace=True)
+
+        qc.measure(range(n+1), range(n+1))
+        qc = pass_manager.run(qc)
+
+        result = simulator.run(qc, shots=1024).result()
+        counts = result.get_counts()
+
+        expected_result = "1" if problem.verify(input_state) else "0"
+        expected_output = expected_result + f"{i:b}".zfill(n)
+        #print("Input:", input_state)
+        #print(problem.statement)
+        #print(counts)
+        #print(expected_output)
+        #print("####")
+
+        # valid oracle if the majority counts are the expected output
+        if counts.get(expected_output, 0) < 512:
+            return False
+
+    logger.info("Oracle verification passed")
+    return True
+
+def count_solutions(oracle: qiskit.QuantumCircuit, num_vars: int, backend: Optional[Backend] = None):
     """
     Estimates the number of solutions to f(x)=1 using Quantum Phase Estimation. 
 
@@ -470,17 +527,17 @@ def count_solutions(oracle: qiskit.QuantumCircuit, n: int, backend: Optional[Bac
     # Assume Uf mode (can change this to be a function argument to toggle for a phase oracle)
     uf_mode = True
 
-    counting_qubits = n
+    counting_qubits = num_vars
     counting_circuit = qiskit.QuantumCircuit(counting_qubits + oracle.num_qubits, counting_qubits)
-    grover_op = grover_operator(oracle, reflection_qubits=range(n))
+    grover_op = grover_operator(oracle, reflection_qubits=range(num_vars))
     
     counting_circuit.h(range(counting_qubits))
-    counting_circuit.h(range(counting_qubits, counting_qubits + n))
+    counting_circuit.h(range(counting_qubits, counting_qubits + num_vars))
 
     # initialize the result qubit to H |1> for phase oracle if uf_mode
     if uf_mode:
-        counting_circuit.x(counting_qubits + n)
-        counting_circuit.h(counting_qubits + n)
+        counting_circuit.x(counting_qubits + num_vars)
+        counting_circuit.h(counting_qubits + num_vars)
         
     for i in range(counting_qubits):
         power = 2**i
@@ -516,7 +573,7 @@ def count_solutions(oracle: qiskit.QuantumCircuit, n: int, backend: Optional[Bac
     
     phase = measured_value / (2**counting_qubits)
 
-    N = 2**n
+    N = 2**num_vars
     m = N * (1 - math.cos(2 * math.pi * phase)) / 2
     return m, phase
 
@@ -566,3 +623,5 @@ def calculate_grover_iterations(num_solutions: int, total_states: int) -> int:
         return math.ceil(result)
     
     return math.floor(result)
+
+

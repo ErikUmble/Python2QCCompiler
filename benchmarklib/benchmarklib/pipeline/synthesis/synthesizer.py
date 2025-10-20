@@ -1,7 +1,7 @@
 """
 Synthesizer module
 
-Synthesizers take a ProblemInstance and return a Quantum Circuit.
+Synthesizers take a BaseProblem and return a Quantum Circuit.
 """
 
 import logging
@@ -19,7 +19,7 @@ class Synthesizer(ABC):
     """
     Abstract base class for quantum circuit synthesizers.
 
-    A synthesizer takes a ProblemInstance and produces an initial quantum circuit.
+    A synthesizer takes a BaseProblem and produces an initial quantum circuit.
     This is the first step in any compilation pipeline.
     """
 
@@ -30,7 +30,7 @@ class Synthesizer(ABC):
         pass
 
     @abstractmethod
-    def synthesize(self, problem: "ProblemInstance", **kwargs) -> QuantumCircuit:
+    def synthesize(self, problem: "BaseProblem", **kwargs) -> QuantumCircuit:
         """
         Synthesize a quantum circuit for the given problem.
 

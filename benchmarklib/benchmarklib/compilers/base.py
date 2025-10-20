@@ -23,7 +23,8 @@ import numpy as np
 from qiskit import QuantumCircuit, transpile
 from qiskit_ibm_runtime import IBMBackend
 
-from ..core import BaseTrial, BenchmarkDatabase, ProblemInstance
+from ..core import BaseTrial, BenchmarkDatabase, BaseProblem
+from ..core.types import _BaseTrial
 
 logger = logging.getLogger("benchmarklib.compiler")
 
@@ -70,7 +71,7 @@ class SynthesisCompiler(ABC):
         pass
 
     @abstractmethod
-    def compile(self, problem: ProblemInstance, **kwargs) -> QuantumCircuit:
+    def compile(self, problem: BaseProblem, **kwargs) -> QuantumCircuit:
         """
         Synthesize a phase-flip oracle for the given problem instance.
 
@@ -126,7 +127,7 @@ class SynthesisResult:
     extra_metrics: Dict[str, Any] = field(default_factory=dict)
 
 
-class SynthesisTrial(BaseTrial):
+class SynthesisTrial(_BaseTrial):
     """
     Trial for synthesis benchmarking.
 
@@ -136,7 +137,7 @@ class SynthesisTrial(BaseTrial):
 
     def __init__(
         self,
-        problem_instance: ProblemInstance,
+        problem_instance: BaseProblem,
         job_id: Optional[str] = None,
         job_pub_idx: int = 0,
         counts: Optional[Dict[str, Any]] = None,
@@ -304,7 +305,7 @@ class SynthesisBenchmark:
         logger.info(f"SynthesisBenchmark initialized with {len(compilers)} compilers")
 
     def benchmark_single(
-        self, compiler: SynthesisCompiler, problem: ProblemInstance, **kwargs
+        self, compiler: SynthesisCompiler, problem: BaseProblem, **kwargs
     ) -> SynthesisResult:
         """
         Run a single compiler on a single problem instance.
@@ -366,7 +367,7 @@ class SynthesisBenchmark:
         return result
 
     def run_benchmarks(
-        self, problems: List[ProblemInstance], skip_existing: bool = True, **kwargs
+        self, problems: List[BaseProblem], skip_existing: bool = True, **kwargs
     ) -> Dict[str, List[SynthesisResult]]:
         """
         Run all compilers on all problem instances.

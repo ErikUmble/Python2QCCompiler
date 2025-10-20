@@ -16,7 +16,7 @@ from classiq import (
 )
 from qiskit import QuantumCircuit
 
-from ... import CliqueProblem, ProblemInstance
+from ... import CliqueProblem, BaseProblem
 from .synthesizer import Synthesizer, SynthesizerRegistry
 
 logger = logging.getLogger("benchmarklib.pipeline.synthesis.classiq_synthesis")
@@ -42,7 +42,7 @@ class ClassiqSynthesizer(Synthesizer):
     def name(self) -> str:
         return str(self.__class__.__name__)
 
-    def synthesize(self, problem: ProblemInstance, **kwargs):
+    def synthesize(self, problem: BaseProblem, **kwargs):
         """
         Compile problem instance to phase-flip oracle using XAG synthesis.
 
