@@ -8,7 +8,7 @@ The synthesis benchmarking module provides a simple, extensible framework for co
 ## Key Design Principles
 
 1. **Simplicity First**: Clean interfaces, minimal complexity
-2. **Integration**: Works with existing `ProblemInstance` and `BenchmarkDatabase`
+2. **Integration**: Works with existing `BaseProblem` and `BenchmarkDatabase`
 3. **Extensibility**: Easy to add new compilers
 4. **Documentation**: Clear, comprehensive documentation for maintainability
 
@@ -48,7 +48,7 @@ class MyCompiler(SynthesisCompiler):
     def name(self) -> str:
         return "MY_COMPILER"
     
-    def compile(self, problem: ProblemInstance, **kwargs) -> QuantumCircuit:
+    def compile(self, problem: BaseProblem, **kwargs) -> QuantumCircuit:
         # Your synthesis logic here
         n = problem.number_of_input_bits()
         oracle = QuantumCircuit(n + 1)
@@ -109,7 +109,7 @@ compare_compilers(
 
 ## Integration with Hardware Benchmarking
 
-The synthesis module integrates with hardware benchmarking through shared `ProblemInstance` objects:
+The synthesis module integrates with hardware benchmarking through shared `BaseProblem` objects:
 
 ```python
 # Same problem, different benchmarks
@@ -153,7 +153,7 @@ Each synthesis run automatically collects:
 When adding support for new problem types to a compiler:
 
 ```python
-def compile(self, problem: ProblemInstance, **kwargs) -> QuantumCircuit:
+def compile(self, problem: BaseProblem, **kwargs) -> QuantumCircuit:
     if isinstance(problem, CliqueProblem):
         return self._compile_clique(problem, **kwargs)
     elif isinstance(problem, SATInst):  # Your new problem type

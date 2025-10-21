@@ -16,7 +16,7 @@ from qiskit import QuantumCircuit, transpile
 from qiskit.circuit import Instruction
 from qiskit_ibm_runtime import IBMBackend
 
-from .. import ProblemInstance
+from .. import BaseProblem
 from .pipeline_steps import PipelineStep, QiskitTranspile, StepRegistry
 from .synthesis import Synthesizer, SynthesizerRegistry
 
@@ -142,7 +142,7 @@ class PipelineCompiler:
         self.name = "+".join([synthesizer.name] + step_names)
 
     def compile(
-        self, problem: "ProblemInstance", return_intermediate: bool = False, **kwargs
+        self, problem: "BaseProblem", return_intermediate: bool = False, **kwargs
     ) -> CompilationResult:
         """
         Run the complete compilation pipeline.

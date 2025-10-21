@@ -5,13 +5,13 @@ from typing import List, Optional, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 
-from .. import (
-    BenchmarkDatabase,
+from ..compilers import (
     ClassiqCompiler,
     SynthesisCompiler,
     TruthTableCompiler,
     XAGCompiler,
 )
+from ..core import BenchmarkDatabase
 
 
 def get_oracle_calls_data(

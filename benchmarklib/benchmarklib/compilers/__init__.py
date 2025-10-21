@@ -1,3 +1,4 @@
+from .compile_type import CompileType
 from .base import (
     SynthesisBenchmark as SynthesisBenchmark,
 )

@@ -9,6 +9,9 @@ Key Components:
 - SynthesisTrial: Stores synthesis benchmark results
 - SynthesisBenchmark: Orchestrates the benchmarking process
 """
+# important that tweedledum is imported before qiskit_ibm_runtime (to avoid bad cast crash)
+from tweedledum import BitVec
+from tweedledum.bool_function_compiler import circuit_input
 
 import logging
 import time
@@ -19,10 +22,9 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 from qiskit import QuantumCircuit, transpile
 from qiskit_ibm_runtime import IBMBackend
-from tweedledum import BitVec
-from tweedledum.bool_function_compiler import circuit_input
 
-from .. import BaseTrial, BenchmarkDatabase, ProblemInstance
+from ..core import BaseTrial, BenchmarkDatabase, BaseProblem
+from ..core.types import _BaseTrial
 
 logger = logging.getLogger("benchmarklib.compiler")
 
@@ -69,7 +71,7 @@ class SynthesisCompiler(ABC):
         pass
 
     @abstractmethod
-    def compile(self, problem: ProblemInstance, **kwargs) -> QuantumCircuit:
+    def compile(self, problem: BaseProblem, **kwargs) -> QuantumCircuit:
         """
         Synthesize a phase-flip oracle for the given problem instance.
 
@@ -125,7 +127,7 @@ class SynthesisResult:
     extra_metrics: Dict[str, Any] = field(default_factory=dict)
 
 
-class SynthesisTrial(BaseTrial):
+class SynthesisTrial(_BaseTrial):
     """
     Trial for synthesis benchmarking.
 
@@ -135,7 +137,7 @@ class SynthesisTrial(BaseTrial):
 
     def __init__(
         self,
-        instance_id: int,
+        problem_instance: BaseProblem,
         job_id: Optional[str] = None,
         job_pub_idx: int = 0,
         counts: Optional[Dict[str, Any]] = None,
@@ -226,7 +228,7 @@ class SynthesisTrial(BaseTrial):
 
         # Call parent constructor with standard parameters
         super().__init__(
-            instance_id=instance_id,
+            problem_instance=problem_instance,
             compiler_name=compiler_name,
             job_id=job_id,
             job_pub_idx=job_pub_idx,
@@ -303,7 +305,7 @@ class SynthesisBenchmark:
         logger.info(f"SynthesisBenchmark initialized with {len(compilers)} compilers")
 
     def benchmark_single(
-        self, compiler: SynthesisCompiler, problem: ProblemInstance, **kwargs
+        self, compiler: SynthesisCompiler, problem: BaseProblem, **kwargs
     ) -> SynthesisResult:
         """
         Run a single compiler on a single problem instance.
@@ -365,7 +367,7 @@ class SynthesisBenchmark:
         return result
 
     def run_benchmarks(
-        self, problems: List[ProblemInstance], skip_existing: bool = True, **kwargs
+        self, problems: List[BaseProblem], skip_existing: bool = True, **kwargs
     ) -> Dict[str, List[SynthesisResult]]:
         """
         Run all compilers on all problem instances.
@@ -410,7 +412,7 @@ class SynthesisBenchmark:
                 # Save to database
                 if self.save_to_db:
                     trial = SynthesisTrial(
-                        instance_id=problem.instance_id,
+                        problem_instance=problem,
                         compiler_name=compiler.name,
                         synthesis_result=result,
                         **kwargs,

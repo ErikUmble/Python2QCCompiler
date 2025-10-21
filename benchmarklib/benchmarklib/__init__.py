@@ -1,7 +1,9 @@
 import logging
 from typing import Dict, Optional, Union
 
-from .core import *
+from .core import *  # noqa: F403
+from .core import _BenchmarkDatabase  # Temporary for migration
+
 from .problems import (
     CliqueProblem,
     CliqueTrial,
@@ -10,6 +12,7 @@ from .problems import (
 # New synthesis benchmarking imports
 from .compilers import (
     ClassiqCompiler,
+    CompileType,
     SynthesisBenchmark,
     SynthesisCompiler,
     SynthesisResult,
@@ -19,6 +22,11 @@ from .compilers import (
     compare_compilers,
 )
 
+from .runners import (
+    BatchQueue,
+)
+
+from . import pipeline
 
 from . import algorithms, analysis, databases, pipeline
 

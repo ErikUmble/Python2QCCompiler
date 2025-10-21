@@ -7,8 +7,9 @@ from tweedledum.classical import optimize
 from tweedledum.passes import linear_resynth, parity_decomp
 from tweedledum.synthesis import xag_cleanup, xag_synth
 
-from .. import CliqueProblem, ProblemInstance
 from .base import SynthesisCompiler, clique_oracle
+from ..core import BaseProblem
+from ..problems import CliqueProblem
 
 logger = logging.getLogger("benchmarklib.compiler.xag")
 
@@ -34,7 +35,7 @@ class XAGCompiler(SynthesisCompiler):
     def name(self) -> str:
         return "XAG"
 
-    def compile(self, problem: ProblemInstance, **kwargs) -> QuantumCircuit:
+    def compile(self, problem: BaseProblem, **kwargs) -> QuantumCircuit:
         """
         Compile problem instance to phase-flip oracle using XAG synthesis.
 

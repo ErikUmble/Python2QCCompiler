@@ -5,12 +5,12 @@ import numpy as np
 from matplotlib.colors import LogNorm
 
 from .. import (
-    BenchmarkDatabase,
     ClassiqCompiler,
     SynthesisCompiler,
     TruthTableCompiler,
     XAGCompiler,
 )
+from ..core import BenchmarkDatabase
 
 
 def get_quantum_advantage_data(

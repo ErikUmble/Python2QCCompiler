@@ -7,8 +7,9 @@ from tweedledum.bool_function_compiler import QuantumCircuitFunction
 from tweedledum.passes import linear_resynth, parity_decomp
 from tweedledum.synthesis import pkrm_synth
 
-from .. import CliqueProblem, ProblemInstance
 from .base import SynthesisCompiler, clique_oracle
+from ..core import BaseProblem
+from ..problems import CliqueProblem
 
 logger = logging.getLogger("benchmarklib.compiler.truth_table")
 
@@ -30,7 +31,7 @@ class TruthTableCompiler(SynthesisCompiler):
     def name(self) -> str:
         return self.__class__.__name__
 
-    def compile(self, problem: ProblemInstance, **kwargs) -> QuantumCircuit:
+    def compile(self, problem: BaseProblem, **kwargs) -> QuantumCircuit:
         """
         Compile problem instance to phase-flip oracle using truth table synthesis.
 

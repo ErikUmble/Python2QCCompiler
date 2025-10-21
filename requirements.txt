@@ -6,3 +6,5 @@ ipykernel
 python-dotenv
 qiskit_aer
 tweedledum  # requires 3.6 <= python <= 3.11
+sqlalchemy
+alembic

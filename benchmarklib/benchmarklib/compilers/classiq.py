@@ -15,8 +15,9 @@ from classiq import (
 )
 from qiskit import QuantumCircuit
 
-from .. import CliqueProblem, ProblemInstance
 from .base import SynthesisCompiler
+from ..core import BaseProblem
+from ..problems import CliqueProblem
 
 logger = logging.getLogger("benchmarklib.compiler.classiq")
 
@@ -40,7 +41,7 @@ class ClassiqCompiler(SynthesisCompiler):
     def name(self) -> str:
         return "CLASSIQ"
 
-    def compile(self, problem: ProblemInstance, **kwargs):
+    def compile(self, problem: BaseProblem, **kwargs):
         """
         Compile problem instance to phase-flip oracle using XAG synthesis.
 
