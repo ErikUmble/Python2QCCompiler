@@ -106,6 +106,7 @@ class CompilationResult:
 
     # Pipeline configuration for reproducibility
     pipeline_config: Optional[Dict[str, Any]] = None
+    artifacts: Optional[Dict[str, Any]] = None
 
 
 class PipelineCompiler:
@@ -194,6 +195,9 @@ class PipelineCompiler:
                     result.final_circuit = circuit
 
             result.success = True
+
+            if hasattr(self.synthesizer, "compilation_artifacts"):
+                result.artifacts = self.synthesizer.compilation_artifacts
 
         except Exception as e:
             result.error_message = str(e)

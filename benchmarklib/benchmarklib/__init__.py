@@ -1,8 +1,7 @@
 import logging
 from typing import Dict, Optional, Union
 
-from .core import *  # noqa: F403
-
+from .core import *
 from .problems import (
     CliqueProblem,
     CliqueTrial,
@@ -20,11 +19,9 @@ from .compilers import (
     compare_compilers,
 )
 
-from . import pipeline
 
-from . import databases
-from . import algorithms
-from . import analysis
+from . import algorithms, analysis, databases, pipeline
+
 
 QUANTUM_BENCHMARKING_LOGGER = __name__
 

@@ -1,4 +1,7 @@
 import logging
+import tempfile
+import pygraphviz
+import networkx as nx
 from typing import Optional
 
 import tweedledum as td
@@ -7,6 +10,7 @@ from tweedledum.bool_function_compiler import QuantumCircuitFunction
 from tweedledum.classical import optimize
 from tweedledum.passes import linear_resynth, parity_decomp
 from tweedledum.synthesis import xag_cleanup, xag_synth
+from tweedledum.utils import xag_export_dot
 
 from ... import CliqueProblem, ProblemInstance
 from .synthesizer import Synthesizer, SynthesizerRegistry, clique_oracle
@@ -31,6 +35,7 @@ class XAGSynthesizer(Synthesizer):
         """
         Initialize XAG compiler.
         """
+        self.compilation_artifacts = {}
 
     @property
     def name(self) -> str:
@@ -70,6 +75,7 @@ class XAGSynthesizer(Synthesizer):
         n = problem.nodes
         classical_inputs = {"n": n, "k": clique_size, "edges": edges}
         qc_func = QuantumCircuitFunction(param_func, **classical_inputs)
+        self.compilation_artifacts["source"] = qc_func.get_transformed_source()
 
         # Get XAG and optionally optimize
         xag = qc_func.logic_network()
@@ -77,6 +83,16 @@ class XAGSynthesizer(Synthesizer):
         logger.debug("Optimizing XAG...")
         xag = xag_cleanup(xag)
         optimize(xag)
+
+        fp = tempfile.NamedTemporaryFile()
+        logger.debug(f"Outputting XAG to tempfile {fp.name}")
+        xag_export_dot(xag, fp.name)
+        graphviz_str = fp.read()
+        logger.debug(graphviz_str)
+
+        agraph = pygraphviz.AGraph().from_string(graphviz_str)
+
+        self.compilation_artifacts["nxag"] = nx.nx_agraph.from_agraph(agraph)
 
         # Synthesize
         logger.debug("Synthesizing from XAG...")

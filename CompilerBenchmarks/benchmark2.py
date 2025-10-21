@@ -33,6 +33,8 @@ from qiskit_ibm_runtime import QiskitRuntimeService
 # Import from benchmarklib
 from benchmarklib import CliqueProblem
 
+from qiskit.circuit.library import RCCXGate
+
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
