@@ -56,7 +56,7 @@ def get_probability_data(
             or problem_size.get(size_keys[0])
         )
 
-        grover_iterations = trial.trial_params.get("grover_iterations", 0)
+        grover_iterations = getattr(trial, "grover_iterations", 0) 
 
         key = (n, grover_iterations)
         if key not in trial_groups:

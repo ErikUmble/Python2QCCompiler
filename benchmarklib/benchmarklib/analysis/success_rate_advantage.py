@@ -53,7 +53,7 @@ def get_quantum_advantage_data(
 
         problem = db_manager.get_problem_instance(trial.instance_id)
         n = problem.number_of_input_bits()
-        grover_iterations = trial.trial_params.get("grover_iterations", 0)
+        grover_iterations = getattr(trial, "grover_iterations", 0) 
 
         key = (n, grover_iterations)
         if key not in trial_groups:
@@ -74,7 +74,7 @@ def get_quantum_advantage_data(
         for trial in trials:
             p = db_manager.calculate_trial_success_rate(trial)
             problem = db_manager.get_problem_instance(trial.instance_id)
-            M = problem.get_number_of_solutions(**trial.trial_params)
+            M = problem.get_number_of_solutions(trial)
 
             if p > 0 and k > 0 and M > 0:  # Avoid division by zero
                 # Classical expected runtime: N/M

@@ -198,18 +198,17 @@ class GroverRunner:
 
         # Check for existing trial
         if skip_existing:
-            trial_params = {"grover_iterations": grover_iterations, **oracle_kwargs}
 
             existing_trials = self.db_manager.find_trials(
-                instance_id=problem_instance.instance_id,
+                problem_id=problem_instance.id,
                 compiler_name=compiler.name,
-                trial_params=trial_params,
+                grover_iterations=grover_iterations,
                 include_pending=True,
             )
 
             if existing_trials:
                 logger.info(
-                    f"Skipping existing trial: Problem {problem_instance.instance_id}, "
+                    f"Skipping existing trial: Problem {problem_instance.id}, "
                     f"{compiler.name}, {grover_iterations} iterations"
                 )
                 return existing_trials[0]
@@ -222,7 +221,7 @@ class GroverRunner:
 
         try:
             logger.debug(
-                f"Collecting circuit for Problem Instance ID: {problem_instance.instance_id}"
+                f"Collecting circuit for Problem Instance ID: {problem_instance.id}"
             )
             print("COMPILING")
 
@@ -238,48 +237,50 @@ class GroverRunner:
             )
 
             # Run simulation
-            simulation_counts = self.run_simulation(grover_circuit)
-
-            # Create trial with all parameters
-            trial_params = {"grover_iterations": grover_iterations, **oracle_kwargs}
+            try:
+                simulation_counts = self.run_simulation(grover_circuit)
+            except Exception as e:
+                logger.error(f"Simulation error: {e}")
+                simulation_counts = None
 
             trial = self.db_manager.trial_class(
-                problem_instance=problem_instance,
+                problem=problem_instance,
                 compiler_name=compiler.name,
                 job_id=None,  # Will be set during submit_job()
-                job_pub_idx=-1,  # Will be set during submit_job()
+                job_pub_idx=None,  # Will be set during submit_job()
                 simulation_counts=simulation_counts,
-                **trial_params,
+                grover_iterations=grover_iterations,
             )
 
             # Save trial to database immediately (if requested)
             if save_to_db:
                 self.db_manager.save_trial(trial)
-                logger.debug(f"Saved trial {trial.trial_id} (pending batch submission)")
+                logger.debug(f"Saved trial {trial.id} (pending batch submission)")
 
             # Add to batch collection
             circuit_metadata = {
-                "problem_id": problem_instance.instance_id,
+                "problem_id": problem_instance.id,
                 "compiler_name": compiler.name,
                 "grover_iterations": grover_iterations,
-                "trial_id": trial.trial_id,
+                "trial_id": trial.id,
             }
 
             self._batch_circuits.append((grover_circuit, trial, circuit_metadata))
 
             logger.debug(
                 f"Collected circuit {len(self._batch_circuits)} for batch "
-                f"(Problem {problem_instance.instance_id}, {grover_iterations} iterations)"
+                f"(Problem {problem_instance.id}, {grover_iterations} iterations)"
             )
 
             return trial
 
         except Exception as e:
+            print(e)
             logger.error(f"Circuit collection failed: {e}")
 
             # Create failed trial
             trial = self.db_manager.trial_class(
-                problem_instance=problem_instance,
+                problem=problem_instance,
                 compiler_name=compiler.name,
                 grover_iterations=grover_iterations,
                 **oracle_kwargs,
