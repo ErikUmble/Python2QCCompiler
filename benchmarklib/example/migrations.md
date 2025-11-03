@@ -115,6 +115,7 @@ alembic current
 2. Run `alembic revision --autogenerate -m "description"`
 3. Review the generated migration
 4. Run `alembic upgrade head`
+5. You can use `alembic check` at any time to verify whether or not the database is synced with the code
 
 ## Common issues
 

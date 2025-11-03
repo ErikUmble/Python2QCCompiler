@@ -47,7 +47,7 @@ class XAGCompiler(SynthesisCompiler):
             Phase-flip oracle quantum circuit
         """
         # Determine which classical function to use based on problem type
-        if isinstance(problem, CliqueProblem):
+        if isinstance(problem, CliqueProblem) or problem.problem_type == "CLIQUE":
             return self._compile_clique(problem, **kwargs)
         else:
             raise NotImplementedError(

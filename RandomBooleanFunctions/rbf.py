@@ -133,7 +133,7 @@ class RandomBooleanFunction(BaseProblem):
     def number_of_input_bits(self) -> int:
         return self.num_vars
 
-    def verify(self, inpt: BitVec) -> bool:
+    def verify_solution(self, inpt: BitVec) -> bool:
         """
         Checks whether or not inpt satisfies this problem
         Returns:
@@ -146,6 +146,21 @@ class RandomBooleanFunction(BaseProblem):
         for i, var in enumerate(self.vars):
             input_variables[var] = int(inpt[i])
         return eval(self.statement, {}, input_variables)
+    
+    def get_verifier_src(self) -> str:
+        import re
+    
+        # Find all variable references (x followed by digits)
+        def replace_var(match):
+            var_num = int(match.group(1))
+            return f"inpt[{var_num - 1}]"
+    
+        # Replace x1, x2, etc. with inpt[0], inpt[1], etc.
+        transformed = re.sub(r'x(\d+)', replace_var, self.statement)
+        
+        # Create the function body
+        func_code = f"def verify(inpt: Tuple[bool]) -> bool:\n    return {transformed}"
+        return func_code
 
     def oracle(self, compile_type: CompileType) -> QuantumCircuit:
         import tempfile
@@ -270,6 +285,9 @@ class RandomBooleanFunctionTrial(TrialCircuitMetricsMixin, BaseTrial):
         db_manager: Optional[BenchmarkDatabase] = None,
     ) -> float:
         # using exact match rate across all qubits as the success metric
+        # note that although the compiler may introduce additional ancilla qubits,
+        # we only measure the input and output qubits, so the ancilla qubits do not affect 
+        # the expected counts or success rate
         return self.exact_match_rate
     
 
@@ -377,7 +395,17 @@ from tweedledum.bool_function_compiler import circuit_input
         raise ValueError(f"{compile_type} not yet supported for RandomBooleanFunction")
     
 
-def run_rbf_benchmark(db_manager: BenchmarkDatabase, compiler: "SynthesisCompiler", backend: Backend, num_vars_iter: Iterable[int], complexity_iter: Iterable[int], num_functions: int = 10, trials_per_instance: int = 5, shots: int = 10**3, max_problems_per_job: Optional[int] = None):
+def create_compilation_failure(db_manager: BenchmarkDatabase, problem: RandomBooleanFunction, compiler_name: str):
+    trial = RandomBooleanFunctionTrial(
+        problem=problem,
+        compiler_name=compiler_name,
+        is_failed=True,
+        input_state=""
+    )
+    db_manager.save_trial(trial)
+
+
+def run_rbf_benchmark(db_manager: BenchmarkDatabase, compiler: "SynthesisCompiler", backend: Backend, num_vars_iter: Iterable[int], complexity_iter: Iterable[int], num_functions: int = 10, trials_per_instance: int = 5, shots: int = 10**3, max_problems_per_job: Optional[int] = None, save_circuits: Optional[bool] = True):
     """
     Run benchmarks for random boolean functions with varying number of variables and complexity.
 
@@ -419,8 +447,12 @@ def run_rbf_benchmark(db_manager: BenchmarkDatabase, compiler: "SynthesisCompile
                     limit=num_functions-count
                 )
                 for problem_instance in problem_instances:
-                    logger.info(f"Benchmarking with problem {problem_instance.statement}")
+                    logger.info(f"Benchmarking with problem {problem_instance.id}: {problem_instance.statement}")
                     oracle = problem_instance.oracle(compiler.name)  # TODO: should update this to use new compiler API
+                    if oracle is None:
+                        logger.warning(f"Compilation failed for problem {problem_instance.id}: {problem_instance.statement} with compiler {compiler.name}")
+                        create_compilation_failure(db_manager, problem_instance, compiler.name)
+                        continue
                     for _ in range(trials_per_instance):
                         input_state = ''.join(random.choice('01') for _ in range(num_vars))
                         qc = qiskit.QuantumCircuit(max(oracle.num_qubits, num_vars + 1), num_vars + 1)
@@ -430,13 +462,16 @@ def run_rbf_benchmark(db_manager: BenchmarkDatabase, compiler: "SynthesisCompile
 
                         qc.compose(oracle, inplace=True)
                         qc.measure(range(num_vars + 1), range(num_vars + 1))
+                        transpiled_qc = transpile(qc, backend=backend)
 
                         trial = RandomBooleanFunctionTrial(
                             problem=problem_instance,
                             compiler_name=compiler.name,
                             input_state=input_state,
+                            circuit = transpiled_qc if save_circuits else None,
+                            circuit_pretranspile = qc if save_circuits else None,
                         )
-                        transpiled_qc = transpile(qc, backend=backend)
+                        
                         q.enqueue(trial, transpiled_qc, run_simulation=(qc.num_qubits <= 10))
 
                     pending_trial_problem_count += 1

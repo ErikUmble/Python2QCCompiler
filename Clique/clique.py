@@ -4,12 +4,13 @@ import itertools
 import json
 import math
 import tempfile
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 import numpy as np
 import qiskit
-from qiskit import QuantumCircuit
+from qiskit import QuantumCircuit, transpile
 from qiskit.circuit.library import grover_operator
+from qiskit.providers import Backend
 from sqlalchemy import JSON, String
 from sqlalchemy.orm import Mapped, mapped_column
 from tweedledum import BitVec
@@ -17,7 +18,9 @@ from tweedledum.bool_function_compiler import QuantumCircuitFunction
 from tweedledum.bool_function_compiler.decorators import circuit_input
 
 from benchmarklib import BaseTrial, BaseProblem, BenchmarkDatabase, CompileType, TrialCircuitMetricsMixin
-from benchmarklib.core.types import _BaseTrial, _ProblemInstance
+from benchmarklib.algorithms.grover import build_grover_circuit, calculate_grover_iterations
+from benchmarklib.runners.queue import BatchQueue
+from benchmarklib.core.types import _BaseTrial, _ProblemInstance, classproperty
 
 
 @circuit_input(vertices=lambda n: BitVec(n))
@@ -55,6 +58,74 @@ def parameterized_clique_counter_batcher(n: int, k: int, edges) -> BitVec(1):
     generate_batcher_sort_network(vertices, n, k)
 
     return s & sorted_bit_0
+
+
+class SortPairNode:
+    def __init__(self, high, low):
+        self.high = high
+        self.low = low
+
+def get_sort_statements(variables):
+    num_variables = len(variables)
+    statements = []
+
+    nodes = [[SortPairNode(None, None) for _ in range(num_variables)] for _ in range(num_variables)]
+    for i in range(num_variables):
+        nodes[i][0] = SortPairNode(variables[i], None)
+
+    for i in range(1, num_variables):
+        for j in range(1, i+1):
+            s_high = f"s_{i}_{j}_high"
+            s_low = f"s_{i}_{j}_low"
+            nodes[i][j] = SortPairNode(s_high, s_low)
+
+            if j == i:
+                statements.append(f"{s_high} = {nodes[i-1][j-1].high} | {nodes[i][j-1].high}")
+                statements.append(f"{s_low} = {nodes[i-1][j-1].high} & {nodes[i][j-1].high}")
+            else:
+                statements.append(f"{s_high} = {nodes[i-1][j].low} | {nodes[i][j-1].high}")
+                statements.append(f"{s_low} = {nodes[i-1][j].low} & {nodes[i][j-1].high}")
+
+    outputs = [nodes[num_variables-1][num_variables-1].high] + [nodes[num_variables-1][i].low for i in range(num_variables-1, 0, -1)]
+
+    return statements, outputs
+
+def construct_clique_verifier(graph, clique_size=None):
+    """ 
+    Given a graph in the form of binary string 
+    e_11 e_12 e_13 ... e_1n e_23 e_24 ... e_2n ... e_n-1n, returns the string of a python function that takes n boolean variables denoting vertices 
+    True if in the clique and False if not,
+    and returns whether the input is a clique of size at least n/2 in the graph.
+
+    if clique_size is unspecified, the default is to require at least n/2 vertices
+    """
+    n = int((1 + (1 + 8*len(graph))**0.5) / 2)
+    variables = [f'inpt[{i}]' for i in range(n)]
+    statements, sort_outputs = get_sort_statements(variables)
+    clique_size = clique_size or n//2
+
+    # count whether there are at least clique_size vertices in the clique
+    statements.append("count = " + sort_outputs[clique_size-1])
+
+    # whenever there is not an edge between two vertices, they cannot both be in the clique
+    if True:
+        statements.append(f"edge_sat = {variables[0]} | ~ {variables[0]}") # this should be initialized to True, but qiskit classical function cannot yet parse True
+    else:
+        statements.append("edge_sat = True")
+    edge_idx = 0
+    for i in range(n):
+        for j in range(i+1, n):
+            edge = graph[edge_idx]
+            edge_idx += 1
+            if edge == '0':
+                # TODO: we could reduce depth to log instead of linear by applying AND more efficiently
+                # for now, we'll let tweedledum optimize this
+                statements.append(f"edge_sat = edge_sat & ~ ({variables[i]} & {variables[j]})")
+
+    statements.append("return count & edge_sat")
+    output = f"def verify(inpt: Tuple[bool]) -> bool:\n    "
+    output += "\n    ".join(statements)
+    return output
 
 class CliqueProblem(BaseProblem):
     """
@@ -152,6 +223,9 @@ class CliqueProblem(BaseProblem):
 
         return True
 
+    def get_verifier_src(self) -> str:
+        return construct_clique_verifier(self.graph, clique_size=max(self.nodes//2, 2))
+
     #### ProblemInstance Methods ####
 
     def to_dict(self) -> Dict[str, Any]:
@@ -176,8 +250,8 @@ class CliqueProblem(BaseProblem):
             instance_id=instance_id,
         )
 
-    @property
-    def problem_type(self) -> str:
+    @classproperty
+    def problem_type(cls) -> str:
         return "CLIQUE"
 
     def get_problem_size(self) -> Dict[str, int]:
@@ -236,12 +310,6 @@ class CliqueTrial(TrialCircuitMetricsMixin, BaseTrial):
         db_manager: Optional[BenchmarkDatabase] = None,
     ) -> float:
         """Calculate theoretical expected success rate."""
-        if self._problem_instance is None:
-            if db_manager is None:
-                raise ValueError(
-                    "Either problem_instance or db_manager must be provided"
-                )
-            self._problem_instance = self.get_problem_instance(db_manager)
 
         grover_iterations = self.grover_iterations or 1
         clique_size = self.clique_size
@@ -273,14 +341,6 @@ class CliqueTrial(TrialCircuitMetricsMixin, BaseTrial):
 
         if self.is_failed:
             return 0.0
-
-        # Load problem instance if needed
-        if self.problem is None:
-            if db_manager is None:
-                raise ValueError(
-                    "Either problem_instance or db_manager must be provided"
-                )
-            self._problem_instance = self.get_problem_instance(db_manager)
 
         clique_size = self.clique_size
         if clique_size is None:
@@ -593,39 +653,40 @@ def populate_clique_database(
                 )
                 db.save_problem_instance(instance)
 
+def run_clique_benchmark(db: BenchmarkDatabase, compiler: "SynthesisCompiler", backend: Backend, nodes_iter: Iterable[int], edge_probability_iter: Iterable[int], num_problems: int = 20, shots: int = 10**3,):
+    with BatchQueue(db, backend=backend, shots=shots) as q:
+        for nodes in nodes_iter:
+            for prob in edge_probability_iter:
+                for problem in db.find_problem_instances(
+                    nodes=nodes,
+                    edge_probability=prob,
+                    limit=num_problems, 
+                    compiler_name=compiler.name,
+                    choose_untested=True,
+                    random_sample=True
+                ):
+                    target_clique_size = max(nodes//2, 2)
+                    cliques_of_target_size = problem.clique_counts[target_clique_size]
+                    if cliques_of_target_size == 0:
+                        # clique of size target_clique_size DNE for this graph
+                        continue
 
-# Example usage and migration helpers
+                    oracle = compiler.compile(problem, clique_size=target_clique_size)
 
-# Note: we've switched to using the ORM-based database for the unified system,
-# so this migration function is no longer correct
-def migrate_old_graph_to_new_system(old_graph_db_path: str, new_db_path: str) -> None:
-    """Migrate graphs from old system to new unified system."""
-    import sqlite3
+                    optimal_grover_iters = calculate_grover_iterations(cliques_of_target_size, 2**nodes)
+                    for grover_iters in range(1, optimal_grover_iters):
 
-    # Create new database
-    from benchmarklib import _BenchmarkDatabase
-    new_db = _BenchmarkDatabase(new_db_path, _CliqueProblem, _CliqueTrial)
+                        circuit = build_grover_circuit(oracle, problem.number_of_input_bits(), grover_iters)
+                        circuit_transpiled = transpile(circuit, backend=backend)
 
-    distinc_graphs = set()
+                        trial = CliqueTrial(
+                            problem=problem,
+                            compiler_name=compiler.name,
+                            grover_iterations=grover_iters,
+                            clique_size=target_clique_size,
+                            circuit_pretranspile=circuit,
+                            circuit=circuit_transpiled,
+                        )
+                        q.enqueue(trial, circuit_transpiled, run_simulation=(circuit_transpiled.num_qubits <= 12))
+    
 
-    count = 0
-    # Read from old database
-    with sqlite3.connect(old_graph_db_path) as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT g, p, n, clique_counts FROM graphs")
-
-        for row in cursor.fetchall():
-            g, p, n, clique_counts_json = row
-            clique_counts = json.loads(clique_counts_json) if clique_counts_json else []
-
-            if g in distinc_graphs:
-                continue
-
-            distinc_graphs.add(g)
-
-            instance = _CliqueProblem(
-                graph=g, nodes=n, edge_probability=p, clique_counts=clique_counts
-            )
-
-            new_db.save_problem_instance(instance)
-            count += 1
