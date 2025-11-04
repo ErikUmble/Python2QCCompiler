@@ -13,6 +13,7 @@ from tweedledum import BitVec
 
 from benchmarklib import BaseProblem, CompileType, BaseTrial, BenchmarkDatabase, TrialCircuitMetricsMixin
 from benchmarklib import BatchQueue
+from benchmarklib.runners.resource_management import run_with_resource_limits
 from benchmarklib.compilers import SynthesisCompiler
 
 # temporary during db migration
@@ -395,7 +396,7 @@ from tweedledum.bool_function_compiler import circuit_input
         raise ValueError(f"{compile_type} not yet supported for RandomBooleanFunction")
     
 
-def create_compilation_failure(db_manager: BenchmarkDatabase, problem: RandomBooleanFunction, compiler_name: str):
+def create_compilation_failure(db_manager: BenchmarkDatabase, problem: RandomBooleanFunction, compiler_name: str, save_circuits: bool = False):
     trial = RandomBooleanFunctionTrial(
         problem=problem,
         compiler_name=compiler_name,
@@ -404,6 +405,39 @@ def create_compilation_failure(db_manager: BenchmarkDatabase, problem: RandomBoo
     )
     db_manager.save_trial(trial)
 
+def _run_rbf_benchmark_sample(problem: RandomBooleanFunction, compiler: "SynthesisCompiler", backend: Backend, num_trials: int, save_circuits: bool = False) -> Optional[List[RandomBooleanFunctionTrial]]:
+    trials = []
+
+    oracle = problem.oracle(compiler.name)
+
+    if oracle is None:
+        logger.warning(f"Compilation failed for problem {problem.id}: {problem.statement} with compiler {compiler.name}")
+        return None
+    
+    print("compiled oracle; now transpiling")
+
+    for _ in range(num_trials):
+        input_state = ''.join(random.choice('01') for _ in range(problem.num_vars))
+        qc = qiskit.QuantumCircuit(max(oracle.num_qubits, problem.num_vars + 1), problem.num_vars + 1)
+        for i, bit in enumerate(input_state):
+            if bit == '1':
+                qc.x(qc.qubits[i])
+
+        qc.compose(oracle, inplace=True)
+        qc.measure(range(problem.num_vars + 1), range(problem.num_vars + 1))
+
+        transpiled_qc = transpile(qc, backend=backend)
+
+        trials.append(RandomBooleanFunctionTrial(
+                problem=problem,
+                compiler_name=compiler.name,
+                input_state=input_state,
+                circuit = transpiled_qc if save_circuits else None,
+                circuit_pretranspile = qc if save_circuits else None,
+            )
+        )
+
+    return trials
 
 def run_rbf_benchmark(db_manager: BenchmarkDatabase, compiler: "SynthesisCompiler", backend: Backend, num_vars_iter: Iterable[int], complexity_iter: Iterable[int], num_functions: int = 10, trials_per_instance: int = 5, shots: int = 10**3, max_problems_per_job: Optional[int] = None, save_circuits: Optional[bool] = True):
     """
@@ -448,30 +482,33 @@ def run_rbf_benchmark(db_manager: BenchmarkDatabase, compiler: "SynthesisCompile
                 )
                 for problem_instance in problem_instances:
                     logger.info(f"Benchmarking with problem {problem_instance.id}: {problem_instance.statement}")
-                    oracle = problem_instance.oracle(compiler.name)  # TODO: should update this to use new compiler API
-                    if oracle is None:
-                        logger.warning(f"Compilation failed for problem {problem_instance.id}: {problem_instance.statement} with compiler {compiler.name}")
+                    
+                    compiler_run = run_with_resource_limits(
+                        _run_rbf_benchmark_sample,
+                        kwargs={
+                            "problem": problem_instance,
+                            "compiler": compiler,
+                            "backend": backend,
+                            "num_trials": trials_per_instance,
+                            "save_circuits": True # we need to access these circuits for the enqueue
+                        },
+                        memory_limit_mb=2024,
+                        timeout_seconds=120 + (240 * trials_per_instance),
+                    )
+                    trials = compiler_run.result if compiler_run.success else None
+                    if trials is None:
+                        logger.warning(f"Compilation or transpilation failed for problem {problem_instance.id} with compiler {compiler.name}: {compiler_run.error_message}")
                         create_compilation_failure(db_manager, problem_instance, compiler.name)
                         continue
-                    for _ in range(trials_per_instance):
-                        input_state = ''.join(random.choice('01') for _ in range(num_vars))
-                        qc = qiskit.QuantumCircuit(max(oracle.num_qubits, num_vars + 1), num_vars + 1)
-                        for i, bit in enumerate(input_state):
-                            if bit == '1':
-                                qc.x(qc.qubits[i])
 
-                        qc.compose(oracle, inplace=True)
-                        qc.measure(range(num_vars + 1), range(num_vars + 1))
-                        transpiled_qc = transpile(qc, backend=backend)
+                    logger.info(f"Compilation and transpilation successful")
 
-                        trial = RandomBooleanFunctionTrial(
-                            problem=problem_instance,
-                            compiler_name=compiler.name,
-                            input_state=input_state,
-                            circuit = transpiled_qc if save_circuits else None,
-                            circuit_pretranspile = qc if save_circuits else None,
-                        )
-                        
+                    for trial in trials:
+                        qc = trial.circuit_pretranspile
+                        transpiled_qc = trial.circuit
+                        if not save_circuits:
+                            trial.circuit = None
+                            trial.circuit_pretranspile = None
                         q.enqueue(trial, transpiled_qc, run_simulation=(qc.num_qubits <= 10))
 
                     pending_trial_problem_count += 1
