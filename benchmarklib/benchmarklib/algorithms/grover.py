@@ -463,7 +463,7 @@ def build_grover_circuit(
     return search_circuit  
 
 
-def verify_oracle(oracle: qiskit.QuantumCircuit, num_vars: int, problem: BaseProblem) -> bool:
+def verify_oracle(oracle: qiskit.QuantumCircuit, problem: BaseProblem) -> bool:
     """
     Verify oracle correctness by checking its action on all basis states.
 
@@ -473,15 +473,13 @@ def verify_oracle(oracle: qiskit.QuantumCircuit, num_vars: int, problem: BasePro
     Returns:
         True if oracle behaves correctly, False otherwise
     """
-    if num_vars > 10:
-        logger.warning(f"Attempting to verify a large oracle ({num_vars} qubits). This could be resource-intensive.")
-        
-    print(num_vars, oracle.num_qubits, problem.statement)
-    n = num_vars
+    n = problem.number_of_input_bits()
+    if n > 10:
+        logger.warning(f"Attempting to verify a large oracle ({n} qubits). This could be resource-intensive.")
+    
     simulator = AerSimulator()
     pass_manager = generate_preset_pass_manager(optimization_level=1, backend=simulator)
     oracle = pass_manager.run(oracle)
-    print(oracle.draw('text'))
 
     for i in range(2**n):
         input_state = [(i >> j) & 1 for j in range(n)]
@@ -497,13 +495,8 @@ def verify_oracle(oracle: qiskit.QuantumCircuit, num_vars: int, problem: BasePro
         result = simulator.run(qc, shots=1024).result()
         counts = result.get_counts()
 
-        expected_result = "1" if problem.verify(input_state) else "0"
+        expected_result = "1" if problem.verify_solution(input_state) else "0"
         expected_output = expected_result + f"{i:b}".zfill(n)
-        #print("Input:", input_state)
-        #print(problem.statement)
-        #print(counts)
-        #print(expected_output)
-        #print("####")
 
         # valid oracle if the majority counts are the expected output
         if counts.get(expected_output, 0) < 512:

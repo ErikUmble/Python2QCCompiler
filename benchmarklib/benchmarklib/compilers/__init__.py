@@ -16,4 +16,5 @@ from .base import (
 )
 from .classiq import ClassiqCompiler as ClassiqCompiler
 from .truth_table import TruthTableCompiler as TruthTableCompiler
+from .truth_table import QCFCompiler as QCFCompiler
 from .xag import XAGCompiler as XAGCompiler

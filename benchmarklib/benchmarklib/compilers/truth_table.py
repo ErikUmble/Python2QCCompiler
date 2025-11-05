@@ -122,3 +122,13 @@ class TruthTableCompiler(SynthesisCompiler):
         """
 
         return self.oracle_qubit if self.oracle_qubit else None
+
+class QCFCompiler(TruthTableCompiler):
+    """
+    Alias for TruthTableCompiler for consistency with database compiler_name.
+    Qiskit Classical Function (QCF) Compiler using truth table synthesis.
+    """
+
+    @property
+    def name(self) -> str:
+        return "CLASSICAL_FUNCTION"
