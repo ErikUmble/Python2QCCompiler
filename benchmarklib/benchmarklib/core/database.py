@@ -26,7 +26,7 @@ import numpy as np
 import sqlite3
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple, Type
-from sqlalchemy import Column, Integer, String, JSON, Float, DateTime, LargeBinary, UniqueConstraint, select, create_engine, select, func, or_, text
+from sqlalchemy import Column, Integer, String, JSON, Float, DateTime, LargeBinary, UniqueConstraint, select, create_engine, select, func, or_, text, update
 from sqlalchemy.orm import declarative_base, Mapped, relationship, mapped_column, sessionmaker, Session, DeclarativeBase, Mapped, relationship, selectinload, joinedload
 from sqlalchemy.ext.mutable import MutableDict
 from sqlalchemy.ext.hybrid import hybrid_property
@@ -1331,6 +1331,7 @@ class BenchmarkDatabase(DatabaseManager):
                     self.trial_class.is_failed == False,
                 )
                 .distinct()
+                .order_by(self.trial_class.created_at)
             )
             results = session.execute(query).scalars().all()
             return list(results)
@@ -1343,6 +1344,7 @@ class BenchmarkDatabase(DatabaseManager):
             job_id: IBM Quantum job ID
             service: QiskitRuntimeService instance
         """
+
         try:
             # Fetch job results asynchronously
             logger.info(f"Fetching results for job {job_id}")
@@ -1352,18 +1354,16 @@ class BenchmarkDatabase(DatabaseManager):
         except RuntimeJobFailureError:
             # Mark trials as failed
             logger.info(f"Job {job_id} failed; marking trials as failed")
-            trials = self.query(
-                select(self.trial_class).where(
-                    self.trial_class.job_id == job_id,
-                    self.trial_class.counts == None,
-                    self.trial_class.is_failed == False,
-                )
-            )
+
             with self.session() as session:
-                for trial in trials:
-                    if trial.is_pending:
-                        trial.is_failed = True
-                        session.merge(trial)
+                session.execute(
+                        update(self.trial_class).where(
+                        self.trial_class.job_id == job_id,
+                        self.trial_class.counts == None,
+                        self.trial_class.is_failed == False,
+                    ).values(is_failed=True)
+                )
+
                 session.commit()
             return
         
@@ -1371,22 +1371,25 @@ class BenchmarkDatabase(DatabaseManager):
             logger.error(f"Error fetching job {job_id}: {e}")
             return
         
-
-        # Update pending trials for this job
-        trials = self.query(
-            select(self.trial_class).where(
-                self.trial_class.job_id == job_id,
-                self.trial_class.counts == None,
-                self.trial_class.is_failed == False,
-            )
-        )
-        updated_count = 0
-
-        with self.session() as session:
-            for trial in trials:
-                if trial.is_pending:
+        try:
+            # Update pending trials for this job
+            with self.session() as session:
+                trials = session.execute(
+                    select(
+                        self.trial_class.id,
+                        self.trial_class.job_pub_idx,
+                    ).where(
+                        self.trial_class.job_id == job_id,
+                        self.trial_class.counts == None,
+                        self.trial_class.is_failed == False,
+                    )
+                ).fetchall()
+                        
+            updates = []
+            for trial_id, job_pub_idx in trials:
+                try:
                     # Extract counts from results
-                    pub_result = results[trial.job_pub_idx]
+                    pub_result = results[job_pub_idx]
 
                     # Handle different result data structures
                     if hasattr(pub_result.data, "c"):
@@ -1395,15 +1398,25 @@ class BenchmarkDatabase(DatabaseManager):
                         counts = pub_result.data.meas.get_counts()
                     else:
                         # Fallback - mark as failed
-                        counts = None
-                        trial.is_failed = True
-
-                    trial.counts = counts
-                    session.merge(trial)
-                    updated_count += 1
-            session.commit()
-
-            logger.info(f"Updated {updated_count} trials for job {job_id}")
+                        updates.append({"id": trial_id, "counts": None, "is_failed": True})
+                        continue
+                    
+                    updates.append({"id": trial_id, "counts": counts})
+                except Exception as e:
+                    logger.warning(f"Error processing trial {trial_id}: {e}")
+                    updates.append({"id": trial_id, "is_failed": True})
+            
+            # Perform bulk update
+            if updates:
+                with self.session() as session:
+                    session.execute(
+                        update(self.trial_class),
+                        updates
+                    )
+                    session.commit()
+                logger.info(f"Updated {len(updates)} trials for job {job_id}")
+        except Exception as e:
+            logger.error(f"Error updating trials for job {job_id}: {e}")
 
     async def update_all_pending_results(self, service, batch_size: int = 5) -> None:
         """
