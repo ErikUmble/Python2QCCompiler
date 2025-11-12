@@ -1,0 +1,3 @@
+[submodule "benchmarklib/benchmarklib/QuantumCompilerMPC"]
+	path = benchmarklib/benchmarklib/QuantumCompilerMPC
+	url = git@github.com:whyster/QuantumCompilerMPC.git

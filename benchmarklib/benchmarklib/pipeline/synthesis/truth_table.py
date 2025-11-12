@@ -9,6 +9,8 @@ from tweedledum.synthesis import pkrm_synth
 from ... import CliqueProblem, BaseProblem
 from .synthesizer import Synthesizer, clique_oracle, SynthesizerRegistry
 
+from typing import Optional
+
 logger = logging.getLogger("benchmarklib.pipeline.synthesis.truth_table")
 
 
@@ -48,6 +50,9 @@ class TruthTableSynthesizer(Synthesizer):
                 f"TruthTableCompiler doesn't support {problem.problem_type} problems yet"
             )
 
+    def target_qubit(self) -> Optional[int]:
+        return self.oracle_qubit if self.oracle_qubit else None
+
     def _compile_clique(self, problem: CliqueProblem, **kwargs) -> QuantumCircuit:
         """Compile clique problem using truth table synthesis."""
         clique_size = kwargs.get("clique_size")
@@ -82,13 +87,13 @@ class TruthTableSynthesizer(Synthesizer):
         qiskit_circuit = td.converters.to_qiskit(td_circuit, circuit_type="gatelist")
 
         # Convert to phase-flip oracle
-        oracle_qubit = qiskit_circuit.num_qubits - 1
+        self.oracle_qubit = qiskit_circuit.num_qubits - 1
 
         phase_oracle = QuantumCircuit(qiskit_circuit.num_qubits)
-        phase_oracle.x(oracle_qubit)
-        phase_oracle.h(oracle_qubit)
+        phase_oracle.x(self.oracle_qubit)
+        phase_oracle.h(self.oracle_qubit)
         phase_oracle.compose(qiskit_circuit, inplace=True)
-        phase_oracle.h(oracle_qubit)
-        phase_oracle.x(oracle_qubit)
+        phase_oracle.h(self.oracle_qubit)
+        phase_oracle.x(self.oracle_qubit)
 
         return phase_oracle
