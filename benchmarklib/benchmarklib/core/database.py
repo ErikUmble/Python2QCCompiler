@@ -22,10 +22,11 @@ import asyncio
 import io
 import json
 import logging
+import numpy as np
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple, Type
-from sqlalchemy import Column, Integer, String, JSON, Float, DateTime, LargeBinary, select, create_engine, select, func, or_, text
+from sqlalchemy import Column, Integer, String, JSON, Float, DateTime, LargeBinary, UniqueConstraint, select, create_engine, select, func, or_, text, update
 from sqlalchemy.orm import declarative_base, Mapped, relationship, mapped_column, sessionmaker, Session, DeclarativeBase, Mapped, relationship, selectinload, joinedload
 from sqlalchemy.ext.mutable import MutableDict
 from sqlalchemy.ext.hybrid import hybrid_property
@@ -33,6 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.exc import DetachedInstanceError
 from qiskit import QuantumCircuit, qpy
 from qiskit_ibm_runtime import RuntimeJobFailureError
+from qiskit.providers import Backend
 
 from .types import Base, BaseTrial, BaseProblem, _ProblemInstance, _BaseTrial
 
@@ -601,9 +603,12 @@ class _BenchmarkDatabase:
             retrieved_job = await asyncio.to_thread(service.job, job_id)
             results = await asyncio.to_thread(retrieved_job.result)
 
+            logger.info(f"Fetched results for job {job_id}")
+
         except RuntimeJobFailureError:
             # Mark trials as failed
             trials = self.find_trials(job_id=job_id, include_pending=True)
+            logger.info(f"Job {job_id} failed; marking trials as failed")
             for trial in trials:
                 if trial.is_pending:
                     trial.mark_failure()
@@ -782,63 +787,52 @@ class _BenchmarkDatabase:
                 trial.recompute_simulation(problem)
                 self.save_trial(trial)
 
-class BenchmarkDatabase:
+
+class BackendProperty(Base):
+    __tablename__ = "backend_properties"
+
+    backend_name: Mapped[str]
+    last_update_date: Mapped[datetime]
+    gates_data: Mapped[List[Dict[str, Any]]] = mapped_column(JSON)
+    
+    # can add other attributes when they become relevant
+
+    # backend_name + last_update_date should be unique together
+    __table_args__ = (
+        UniqueConstraint("backend_name", "last_update_date", name="uq_backend_name_last_update"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<BackendProperty(id={self.id}, backend_name={self.backend_name})>"
+    
+    def get_gate_errors(self) -> Dict[str, List[float]]:
+        error_rates = {}
+        for d in self.gates_data:
+            if d["gate"] not in error_rates:
+                error_rates[d["gate"]] = []
+
+            for param in d["parameters"]:
+                if param["name"] == "gate_error":
+                    error_rates[d["gate"]].append(param["value"])
+
+        return error_rates
+
+    def get_average_gate_errors(self) -> Dict[str, np.floating[Any]]:
+        return {g: np.mean(v) for g, v in self.get_gate_errors().items()}
+
+class DatabaseManager:
     """
-    SQLAlchemy-based Database manager for a single quantum problem type benchmark.
-
-    This class manages both problem instances and trials for ONE problem type
-    in a normalized database schema. Each problem type should have its own
-    database instance and file.
-
-    Type Safety:
-    The database expects to work with consistent BaseProblem and BaseTrial subclass tables.
-    Register these types when creating the database.
-
-    Usage:
-        # Initialize with problem and trial classes
-        db = BenchmarkDatabase(
-            db_name="rbf.db",
-            problem_class=RandomBooleanFunction,
-            trial_class=RandomBooleanFunctionTrial
-        )
-        
-        # high-level methods (backward compatible with previous database manager)
-        db.save_problem_instance(
-            problem = RandomBooleanFunction(...)
-        )
-        trials = db.find_trials(instance_id=1)
-
-        # medium-level approach (for custom sqlalchemy queries that don't require further use of a session)
-        trials = db.query(select(db.trial_class).join(db.problem_class).where(
-            db.trial_class.compiler_name == "XAG",
-            db.problem_class.num_vars >= 5
-        ))
-
-        # another example with shortform syntax for simple filtering
-        problems = db.query(db.problems.filter_by(num_vars=5))
-        
-        # low-level approach (use direct session access for custom queries)
-        with db.session() as session:
-            problems = session.scalars(db.problems.filter_by(num_vars=5))
+    Manager for general database connections.
     """
-
     def __init__(
         self,
         db_name: str,
-        problem_class: Type[BaseProblem],
-        trial_class: Type[BaseTrial],
     ):
         """
-        Initialize database for a specific problem type.
-
         Args:
             db_name: SQLite database filename
-            problem_class: BaseProblem subclass for this database
-            trial_class: BaseTrial subclass for this database
         """
         self.db_name = db_name
-        self.problem_class = problem_class
-        self.trial_class = trial_class
 
         self.engine = create_engine(
             f"sqlite:///{db_name}",
@@ -873,19 +867,6 @@ class BenchmarkDatabase:
         )
         
         Base.metadata.create_all(bind=self.engine)
-        
-        self.problem_type = problem_class.problem_type
-
-        logger.info(f"Database initialized: {self.db_name} ({self.problem_type})")
-
-    
-    @property
-    def problems(self):
-        return select(self.problem_class)
-
-    @property
-    def trials(self):
-        return select(self.trial_class)
     
 
     def session(self) -> Session:
@@ -930,6 +911,142 @@ class BenchmarkDatabase:
         with self.session() as session:
             results = session.execute(query).scalars().all()
             return results
+        
+
+class BackendPropertyManager(DatabaseManager):
+    def latest(self, as_of: Optional[datetime] = None) -> Optional[BackendProperty]:
+        """
+        Get the latest backend properties as of a specific date.
+
+        Args:
+            as_of: Date to filter properties (None for latest overall)
+        """
+        with self.session() as session:
+            query = select(BackendProperty).order_by(BackendProperty.last_update_date.desc())
+            if as_of:
+                query = query.where(BackendProperty.last_update_date <= as_of)
+            result = session.execute(query).scalars().first()
+            return result
+        
+    def load_missing_dates(self, backend: Backend, start_date: Optional[datetime] = None, end_date: Optional[datetime] = None) -> None:
+        """
+        Load missing backend properties for days without data.
+
+        Args:
+            backend: Backend to load properties for
+            start_date: Start date for loading (None for earliest available)
+            end_date: End date for loading (None for latest available)
+        """
+        # identify days we already have data for
+        existing_dates = self.query(
+            select(BackendProperty.last_update_date).distinct().where(
+                BackendProperty.backend_name == backend.name
+            )
+        )
+        existing_dates = {dt.date() for dt in existing_dates}
+
+        # determine date range to check
+        if start_date is None:
+            start_date = min(existing_dates) if existing_dates else datetime.utcnow().date()
+        if end_date is None:
+            end_date = datetime.utcnow().date()
+        date = datetime.combine(start_date, datetime.max.time())
+        end_date = datetime.combine(end_date, datetime.max.time())
+        with self.session() as session:
+            while date <= end_date:
+                if date.date() not in existing_dates:
+                    # load properties for this date
+                    try:
+                        backend_props = backend.properties(datetime=date)
+                        if backend_props.last_update_date.date() in existing_dates:
+                            date += timedelta(days=1)
+                            continue
+                        gates_data = [gate.to_dict() for gate in backend_props.gates]
+                        bp = BackendProperty(
+                            backend_name=backend.name,
+                            last_update_date=backend_props.last_update_date,
+                            gates_data=json.loads(json.dumps(gates_data, default=str)),  # dump and load to ensure JSON serializability
+                        )
+                        session.add(bp)
+                        session.commit()
+                        existing_dates.add(date.date())
+                        logger.info(f"Saved backend properties for {backend.name} on {date}")
+                    except Exception as e:
+                        logger.error(f"Failed to load/save properties for {backend.name} on {date}: {e}")
+                date += timedelta(days=1)
+
+class BenchmarkDatabase(DatabaseManager):
+    """
+    SQLAlchemy-based Database manager for a single quantum problem type benchmark.
+
+    This class manages both problem instances and trials for ONE problem type
+    in a normalized database schema. Each problem type should have its own
+    database instance and file.
+
+    Type Safety:
+    The database expects to work with consistent BaseProblem and BaseTrial subclass tables.
+    Register these types when creating the database.
+
+    Usage:
+        # Initialize with problem and trial classes
+        db = BenchmarkDatabase(
+            db_name="rbf.db",
+            problem_class=RandomBooleanFunction,
+            trial_class=RandomBooleanFunctionTrial
+        )
+        
+        # high-level methods (backward compatible with previous database manager)
+        db.save_problem_instance(
+            problem = RandomBooleanFunction(...)
+        )
+        trials = db.find_trials(instance_id=1)
+
+        # medium-level approach (for custom sqlalchemy queries that don't require further use of a session)
+        trials = db.query(select(db.trial_class).join(db.problem_class).where(
+            db.trial_class.compiler_name == "XAG",
+            db.problem_class.num_vars >= 5
+        ))
+
+        # another example with shortform syntax for simple filtering
+        problems = db.query(db.problems.filter_by(num_vars=5))
+        
+        # low-level approach (use direct session access for custom queries)
+        with db.session() as session:
+            problems = session.scalars(db.problems.filter_by(num_vars=5))
+    """
+
+    def __init__(
+        self,
+        db_name: str,
+        problem_class: Type[BaseProblem],
+        trial_class: Type[BaseTrial],
+        *args, **kwargs
+    ):
+        """
+        Initialize database for a specific problem type.
+
+        Args:
+            db_name: SQLite database filename
+            problem_class: BaseProblem subclass for this database
+            trial_class: BaseTrial subclass for this database
+        """
+        super().__init__(db_name=db_name, *args, **kwargs)
+        
+        self.problem_class = problem_class
+        self.trial_class = trial_class
+
+        self.problem_type = problem_class.problem_type
+
+        logger.info(f"Database initialized: {self.db_name} ({self.problem_type})")
+
+    
+    @property
+    def problems(self):
+        return select(self.problem_class)
+
+    @property
+    def trials(self):
+        return select(self.trial_class)
 
 
     # Problem Instance Operations
@@ -1210,9 +1327,11 @@ class BenchmarkDatabase:
                 select(self.trial_class.job_id)
                 .where(
                     self.trial_class.job_id != None,
-                    self.trial_class.counts == None
+                    self.trial_class.counts == None,
+                    self.trial_class.is_failed == False,
                 )
                 .distinct()
+                .order_by(self.trial_class.created_at)
             )
             results = session.execute(query).scalars().all()
             return list(results)
@@ -1225,19 +1344,26 @@ class BenchmarkDatabase:
             job_id: IBM Quantum job ID
             service: QiskitRuntimeService instance
         """
+
         try:
             # Fetch job results asynchronously
+            logger.info(f"Fetching results for job {job_id}")
             retrieved_job = await asyncio.to_thread(service.job, job_id)
             results = await asyncio.to_thread(retrieved_job.result)
-
+            
         except RuntimeJobFailureError:
             # Mark trials as failed
-            trials = self.find_trials(job_id=job_id, include_pending=True)
+            logger.info(f"Job {job_id} failed; marking trials as failed")
+
             with self.session() as session:
-                for trial in trials:
-                    if trial.is_pending:
-                        trial.is_failed = True
-                        session.merge(trial)
+                session.execute(
+                        update(self.trial_class).where(
+                        self.trial_class.job_id == job_id,
+                        self.trial_class.counts == None,
+                        self.trial_class.is_failed == False,
+                    ).values(is_failed=True)
+                )
+
                 session.commit()
             return
         
@@ -1245,16 +1371,25 @@ class BenchmarkDatabase:
             logger.error(f"Error fetching job {job_id}: {e}")
             return
         
-
-        # Update all trials for this job
-        trials = self.find_trials(job_id=job_id, include_pending=True)
-        updated_count = 0
-
-        with self.session() as session:
-            for trial in trials:
-                if trial.is_pending:
+        try:
+            # Update pending trials for this job
+            with self.session() as session:
+                trials = session.execute(
+                    select(
+                        self.trial_class.id,
+                        self.trial_class.job_pub_idx,
+                    ).where(
+                        self.trial_class.job_id == job_id,
+                        self.trial_class.counts == None,
+                        self.trial_class.is_failed == False,
+                    )
+                ).fetchall()
+                        
+            updates = []
+            for trial_id, job_pub_idx in trials:
+                try:
                     # Extract counts from results
-                    pub_result = results[trial.job_pub_idx]
+                    pub_result = results[job_pub_idx]
 
                     # Handle different result data structures
                     if hasattr(pub_result.data, "c"):
@@ -1263,15 +1398,25 @@ class BenchmarkDatabase:
                         counts = pub_result.data.meas.get_counts()
                     else:
                         # Fallback - mark as failed
-                        counts = None
-                        trial.is_failed = True
-
-                    trial.counts = counts
-                    session.merge(trial)
-                    updated_count += 1
-            session.commit()
-
-            logger.info(f"Updated {updated_count} trials for job {job_id}")
+                        updates.append({"id": trial_id, "counts": None, "is_failed": True})
+                        continue
+                    
+                    updates.append({"id": trial_id, "counts": counts})
+                except Exception as e:
+                    logger.warning(f"Error processing trial {trial_id}: {e}")
+                    updates.append({"id": trial_id, "is_failed": True})
+            
+            # Perform bulk update
+            if updates:
+                with self.session() as session:
+                    session.execute(
+                        update(self.trial_class),
+                        updates
+                    )
+                    session.commit()
+                logger.info(f"Updated {len(updates)} trials for job {job_id}")
+        except Exception as e:
+            logger.error(f"Error updating trials for job {job_id}: {e}")
 
     async def update_all_pending_results(self, service, batch_size: int = 5) -> None:
         """

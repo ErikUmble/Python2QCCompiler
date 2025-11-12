@@ -66,7 +66,7 @@ def get_oracle_calls_data(
             or problem_size.get(size_keys[0])
         )
 
-        grover_iterations = trial.trial_params.get("grover_iterations", 0)
+        grover_iterations = getattr(trial, "grover_iterations", 0) 
 
         key = (n, grover_iterations)
         if key not in trial_groups:
@@ -98,7 +98,7 @@ def get_oracle_calls_data(
                     problem = trial.get_problem_instance(db_manager)
                     try:
                         num_solutions = problem.get_number_of_solutions(
-                            **trial.trial_params
+                            trial
                         )
                     except NotImplementedError:
                         print(
