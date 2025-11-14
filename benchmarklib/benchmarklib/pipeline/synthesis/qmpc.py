@@ -112,7 +112,7 @@ class QuantumMPC(Synthesizer):
             Phase-flip oracle quantum circuit
         """
         # Determine which classical function to use based on problem type
-        if isinstance(problem, CliqueProblem):
+        if isinstance(problem, CliqueProblem) or problem.problem_type.lower() == "clique":
             return self._compile_clique(problem, **kwargs)
         else:
             raise NotImplementedError(
@@ -153,7 +153,6 @@ class QuantumMPC(Synthesizer):
         n = problem.nodes
 
         # 'w' mode erases current contents
-        logger.error(CLIQUE_VERIFIER_CONSTANTS)
         with open(CLIQUE_VERIFIER_CONSTANTS, "w") as input_f:
             input_file_contents = self.convert_problem_to_input_file(
                 problem, clique_size
@@ -172,6 +171,17 @@ class QuantumMPC(Synthesizer):
             False,
             False,  # Do not output vectorized code. If True, only outputs vectorized code when invoked from the command line
         )
+
+        # adjust linear to ensure the first variable used is also the result variable
+        # so that Tweedledum synthesizes the oracle to correctly have the result qubit as the n+1 qubit
+        linear_lines = str(linear).split("\n")
+        indent = linear_lines[1][: linear_lines[1].index(linear_lines[1].lstrip())]
+        new_return_val = "_result_result_mpc"
+        linear_lines.insert(1, f"{indent}{new_return_val} = True")
+        original_return_val = linear_lines[-1].split("return ")[1].strip()
+        linear_lines[-1] = f"{indent}{new_return_val} = {new_return_val} and {original_return_val}"
+        linear_lines.append(f"{indent}return {new_return_val}")
+        linear = "\n".join(linear_lines)
 
         # Take linear, and remove the function definition and replace it with our own
         func_def = f"@circuit_input(Vertices_ex_0=lambda n: BitVec(n))\ndef clique_verifier_qmpc(n={n}) -> BitVec(1):"
@@ -192,6 +202,7 @@ class QuantumMPC(Synthesizer):
         print(qc_verifier_source)
         qc_func = QuantumCircuitFunction(clique_verifier_qmpc)
         self.compilation_artifacts["source"] = qc_func.get_transformed_source()
+        print(qc_func.get_transformed_source())
         self.compilation_artifacts["classical_verifier"] = (
             clique_verifier_qmpc_classical
         )
@@ -220,7 +231,7 @@ class QuantumMPC(Synthesizer):
         # Apply Tweedledum optimization passes
         logger.debug("Applying optimization passes...")
         td_circuit = parity_decomp(td_circuit)
-        td_circuit = linear_resynth(td_circuit)
+        #td_circuit = linear_resynth(td_circuit)  # warning: linear_resynth occasionally produces invalid results (non-equivalent circuit)
 
         # Convert to Qiskit
         qiskit_circuit = converters.to_qiskit(td_circuit, circuit_type="gatelist")
@@ -229,17 +240,17 @@ class QuantumMPC(Synthesizer):
         # The oracle qubit is the last qubit (output of the function)
         self.oracle_qubit = n
 
-        phase_oracle = QuantumCircuit(qiskit_circuit.num_qubits)
-        phase_oracle.x(self.oracle_qubit)
-        phase_oracle.h(self.oracle_qubit)
-        phase_oracle.compose(qiskit_circuit, inplace=True)
-        phase_oracle.h(self.oracle_qubit)
-        phase_oracle.x(self.oracle_qubit)
+        #phase_oracle = QuantumCircuit(qiskit_circuit.num_qubits)
+        #phase_oracle.x(self.oracle_qubit)
+        #phase_oracle.h(self.oracle_qubit)
+        #phase_oracle.compose(qiskit_circuit, inplace=True)
+        #phase_oracle.h(self.oracle_qubit)
+        #phase_oracle.x(self.oracle_qubit)
 
         # restore stdout
         sys.stdout = original_stdout
 
-        return phase_oracle
+        return qiskit_circuit#phase_oracle
 
     def target_qubit(self) -> Optional[int]:
         """
