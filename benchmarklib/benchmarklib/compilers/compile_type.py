@@ -1,4 +1,0 @@
-class CompileType:
-    DIRECT = "DIRECT"
-    CLASSICAL_FUNCTION = "CLASSICAL_FUNCTION"
-    XAG = "XAG"
