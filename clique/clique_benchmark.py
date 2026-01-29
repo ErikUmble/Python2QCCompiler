@@ -20,9 +20,7 @@ from graph_database import Graphs, Graph, verify_clique
 load_dotenv()
 API_TOKEN = os.getenv("API_TOKEN")
 API_INSTANCE = os.getenv("API_INSTANCE", None)
-service = QiskitRuntimeService(
-    channel="ibm_quantum", token=API_TOKEN, instance=API_INSTANCE
-)
+service = QiskitRuntimeService()
 backend = service.backend(name="ibm_rensselaer")
 graph_db = Graphs()
 

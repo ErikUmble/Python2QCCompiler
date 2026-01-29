@@ -2,6 +2,7 @@
 import importlib.util
 import itertools
 import json
+import logging
 import math
 import tempfile
 from typing import Any, Dict, Iterable, List, Optional
@@ -11,17 +12,21 @@ import qiskit
 from qiskit import QuantumCircuit, transpile
 from qiskit.circuit.library import grover_operator
 from qiskit.providers import Backend
-from sqlalchemy import JSON, String
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy import JSON, String, select, func
+from sqlalchemy.orm import Mapped, mapped_column, aliased
 from tweedledum import BitVec
 from tweedledum.bool_function_compiler import QuantumCircuitFunction
 from tweedledum.bool_function_compiler.decorators import circuit_input
 
 from benchmarklib import BaseTrial, BaseProblem, BenchmarkDatabase, CompileType, TrialCircuitMetricsMixin
-from benchmarklib.algorithms.grover import build_grover_circuit, calculate_grover_iterations
+from benchmarklib.algorithms.grover import build_grover_circuit, calculate_grover_iterations, verify_oracle
 from benchmarklib.runners.queue import BatchQueue
-from benchmarklib.core.types import _BaseTrial, _ProblemInstance, classproperty
+from benchmarklib.runners.resource_management import run_with_resource_limits
+from benchmarklib.core.types import classproperty
+from benchmarklib.pipeline import PipelineCompiler
+from benchmarklib.pipeline.config import PipelineConfig
 
+logger = logging.getLogger("Clique.clique")
 
 @circuit_input(vertices=lambda n: BitVec(n))
 def parameterized_clique_counter_cardinality(n: int, k: int, edges) -> BitVec(1):
@@ -145,6 +150,8 @@ class CliqueProblem(BaseProblem):
     edge_probability: Mapped[Optional[int]]
     _clique_counts: Mapped[Optional[List[int]]] = mapped_column(JSON)
 
+    trials = None # disable relationship back-population as we have two kinds of trials
+
     def __init__(self, *args, **kwargs):
         if "clique_counts" in kwargs:
             kwargs["_clique_counts"] = kwargs.pop("clique_counts")
@@ -158,6 +165,11 @@ class CliqueProblem(BaseProblem):
         if not self._clique_counts:
             self.compute_clique_counts()
         return self._clique_counts
+
+    @property
+    def target_clique_size(self) -> int:
+        """Get target clique size (default n/2)."""
+        return max(self.nodes // 2, 2)
 
     def compute_clique_counts(self) -> List[int]:
         """Compute the number of vertex subsets that form cliques of at least size k."""
@@ -224,7 +236,7 @@ class CliqueProblem(BaseProblem):
         return True
 
     def get_verifier_src(self) -> str:
-        return construct_clique_verifier(self.graph, clique_size=max(self.nodes//2, 2))
+        return construct_clique_verifier(self.graph, clique_size=self.target_clique_size)
 
     #### ProblemInstance Methods ####
 
@@ -305,6 +317,12 @@ class CliqueTrial(TrialCircuitMetricsMixin, BaseTrial):
     grover_iterations: Mapped[Optional[int]]
     clique_size: Mapped[int]
 
+    def __init__(self, *args, **kwargs):
+        # supply default clique_size from problem if not provided
+        if "clique_size" not in kwargs and "problem" in kwargs:
+            kwargs["clique_size"] = kwargs["problem"].target_clique_size
+        super().__init__(*args, **kwargs)
+
     def calculate_expected_success_rate(
         self,
         db_manager: Optional[BenchmarkDatabase] = None,
@@ -336,11 +354,11 @@ class CliqueTrial(TrialCircuitMetricsMixin, BaseTrial):
         db_manager: Optional[BenchmarkDatabase] = None,
     ) -> float:
         """Calculate actual success rate from measurement results."""
-        if self.counts is None:
-            raise ValueError("counts is empty -- cannot compute success rate")
-
         if self.is_failed:
             return 0.0
+        
+        if self.counts is None:
+            raise ValueError("counts is empty -- cannot compute success rate")
 
         clique_size = self.clique_size
         if clique_size is None:
@@ -365,257 +383,41 @@ class CliqueTrial(TrialCircuitMetricsMixin, BaseTrial):
 
         return num_valid_cliques / total_shots if total_shots > 0 else 0.0
 
-class _CliqueProblem(_ProblemInstance):
-    def __init__(
-        self,
-        graph: str,
-        nodes: int,
-        edge_probability: Optional[int] = None,
-        clique_counts: Optional[List[int]] = None,
-        instance_id: Optional[int] = None,
-    ):
-        """
-        Clique Problem Instance
+#CliqueOracleProblem = aliased(CliqueProblem, name="clique_oracle_problems")
 
-        Args:
-            g: Edge representation as binary string (e_12 e_13 ... e_1n e_23 ... e_(n-1)n)
-            n: Number of vertices in the graph
-            p: Edge probability (integer percentage, optional)
-            clique_counts: Precomputed clique counts (optional, will compute if needed)
-            instance_id: Database ID (None for unsaved instances)
-        """
-        super().__init__(instance_id)
+class CliqueOracleTrial(TrialCircuitMetricsMixin, BaseTrial):
+    """Trial for measuring the output to a specific input to a clique oracle."""
 
-        self.graph = graph
-        self.nodes = nodes
-        self.edge_probability = edge_probability
-        self._clique_counts = clique_counts or []
+    __tablename__ = "clique_oracle_trials"
+    ProblemClass = CliqueProblem
 
-        # Validate edge representation
-        expected_edges = nodes * (nodes - 1) // 2
-        if len(graph) != expected_edges:
-            raise ValueError(
-                f"Invalid edge representation: expected {expected_edges} edges, got {len(graph)}"
+    input_state: Mapped[str]
+    expected_output: Mapped[Optional[bool]]
+
+    def __init__(self, *args, **kwargs):
+        if kwargs.get("is_failed", False):
+            kwargs["input_state"] = "-1"
+        super().__init__(*args, **kwargs)
+        if self.expected_output is None:
+            self.expected_output = self.problem.verify_clique(
+                self.input_state, self.problem.target_clique_size
             )
-
-    @property
-    def clique_counts(self) -> List[int]:
-        """Get clique counts, computing if necessary."""
-        if not self._clique_counts:
-            self.compute_clique_counts()
-        return self._clique_counts
-
-    def compute_clique_counts(self) -> List[int]:
-        """Compute the number of vertex subsets that form cliques of at least size k."""
-        adjacency_matrix = self.as_adjacency_matrix()
-        n = self.nodes
-        clique_counts = [0 for _ in range(n + 1)]
-
-        # All subsets are cliques of size 0
-        clique_counts[0] = 2**n
-
-        # All single vertices are cliques of size 1
-        clique_counts[1] = n
-
-        # Count edges for cliques of size 2
-        clique_counts[2] = sum([1 for e in self.graph if e == "1"])
-
-        # Count larger cliques
-        for i in range(3, n + 1):
-            for clique in itertools.combinations(range(n), i):
-                if all(
-                    adjacency_matrix[u, v] for u, v in itertools.combinations(clique, 2)
-                ):
-                    clique_counts[i] += 1
-
-        # Make counts cumulative (at least k vertices in clique)
-        for i in range(n - 1, 0, -1):
-            clique_counts[i] += clique_counts[i + 1]
-
-        self._clique_counts = clique_counts
-        return clique_counts
-
-    def as_adjacency_matrix(self) -> np.ndarray:
-        """Convert edge representation to adjacency matrix."""
-        adjacency_matrix = np.zeros((self.nodes, self.nodes))
-        edge_idx = 0
-
-        for i in range(self.nodes):
-            for j in range(i + 1, self.nodes):
-                if self.graph[edge_idx] == "1":
-                    adjacency_matrix[i, j] = 1
-                    adjacency_matrix[j, i] = 1
-                edge_idx += 1
-
-        return adjacency_matrix
-
-    def verify_clique(self, vertex_assignment: str, clique_size: int) -> bool:
-        """Verify if a vertex assignment represents a valid clique."""
-        if len(vertex_assignment) != self.nodes:
-            return False
-
-        # Check if enough vertices are selected
-        if sum(1 for v in vertex_assignment if v == "1") < clique_size:
-            return False
-
-        # Check that selected vertices form a clique
-        edge_idx = 0
-        for i in range(self.nodes):
-            for j in range(i + 1, self.nodes):
-                if self.graph[edge_idx] == "0":  # No edge between i and j
-                    if vertex_assignment[i] == "1" and vertex_assignment[j] == "1":
-                        return False  # Both selected but no edge
-                edge_idx += 1
-
-        return True
-
-    #### ProblemInstance Methods ####
-
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to JSON-serializable dictionary."""
-        return {
-            "graph": self.graph,
-            "nodes": self.nodes,
-            "edge_probability": self.edge_probability,
-            "clique_counts": self._clique_counts,
-        }
-
-    @classmethod
-    def from_dict(
-        cls, data: Dict[str, Any], instance_id: Optional[int] = None
-    ) -> "CliqueProblem":
-        """Create instance from dictionary."""
-        return cls(
-            graph=data["graph"],
-            nodes=data["nodes"],
-            edge_probability=data.get("edge_probability"),
-            clique_counts=data.get("clique_counts", []),
-            instance_id=instance_id,
-        )
-
-    @property
-    def problem_type(self) -> str:
-        return "CLIQUE"
-
-    def get_problem_size(self) -> Dict[str, int]:
-        """Return key size metrics."""
-        num_edges = sum(1 for e in self.graph if e == "1")
-        return {
-            "num_vertices": self.nodes,
-            "num_edges": num_edges,
-            "edge_probability": self.edge_probability or 0,
-        }
-
-    def number_of_input_bits(self) -> int:
-        """Number of input bits for quantum oracle."""
-        return self.nodes
-
-    def oracle(self, compile_type: CompileType, **kwargs) -> QuantumCircuit:
-        """Generate quantum oracle circuit for clique detection."""
-        clique_size = kwargs.get("clique_size")
-        if clique_size is None:
-            raise ValueError("clique_size must be specified in kwargs")
-
-        edges = self.as_adjacency_matrix().flatten().tolist()
-        classical_circuit = QuantumCircuitFunction(
-            parameterized_clique_counter_batcher, self.nodes, clique_size, edges
-        )
-
-        if compile_type == CompileType.DIRECT:
-            raise ValueError("DIRECT not supported")
-        elif compile_type == CompileType.CLASSICAL_FUNCTION:
-            return classical_circuit.truth_table_synthesis()
-        elif compile_type == CompileType.XAG:
-            return classical_circuit.synthesize_quantum_circuit()
         else:
-            raise NotImplementedError(f"Compile type {compile_type} not implemented")
+            self.expected_output = self.expected_output
 
-    def get_number_of_solutions(self, **trial_params) -> int:
-        clique_size = trial_params.get("clique_size", None)
-        if clique_size is None:
-            raise ValueError(
-                "No clique size for this trial, cannot compute number of solutions"
-            )
-
-        return self.clique_counts[clique_size]
-
-
-class _CliqueTrial(_BaseTrial):
-    """Trial for clique detection using Grover's algorithm."""
-
-    def calculate_expected_success_rate(
-        self,
-        db_manager: Optional[BenchmarkDatabase] = None,
-    ) -> float:
-        """Calculate theoretical expected success rate."""
-        if self._problem_instance is None:
-            if db_manager is None:
-                raise ValueError(
-                    "Either problem_instance or db_manager must be provided"
-                )
-            self._problem_instance = self.get_problem_instance(db_manager)
-
-        grover_iterations = self.trial_params.get("grover_iterations", 1)
-        clique_size = self.trial_params.get("clique_size")
-
-        if clique_size is None:
-            raise ValueError("clique_size not found in trial_params")
-
-        # Get number of solutions (cliques of at least the specified size)
-        m = self._problem_instance.clique_counts[clique_size]
-        N = 2**self._problem_instance.nodes
-
-        if m == 0:
-            return 0.0
-
-        # Grover success probability calculation
-        q = (2 * m) / N
-        theta = math.atan(math.sqrt(q * (2 - q)) / (1 - q))
-        phi = math.atan(math.sqrt(q / (2 - q)))
-
-        return math.sin(grover_iterations * theta + phi) ** 2
-
-    def calculate_success_rate(
-        self,
-        db_manager: Optional[BenchmarkDatabase] = None,
-    ) -> float:
-        """Calculate actual success rate from measurement results."""
-        if self.counts is None:
-            raise ValueError("counts is empty -- cannot compute success rate")
-
+    def calculate_success_rate(self, *args, **kwargs) -> float:
+        """Calculate success rate based on measurement results."""
         if self.is_failed:
             return 0.0
 
-        # Load problem instance if needed
-        if self._problem_instance is None:
-            if db_manager is None:
-                raise ValueError(
-                    "Either problem_instance or db_manager must be provided"
-                )
-            self._problem_instance = self.get_problem_instance(db_manager)
+        if self.counts is None:
+            raise ValueError("counts is empty -- cannot compute success rate")
+        
+        total_shots = sum(self.counts.values())
+        total_expected_output = (self.input_state + ("1" if self.expected_output else "0"))[::-1]  # reverse bit order for qiskit measurement
+        successful_shots = self.counts.get(total_expected_output, 0)
 
-        clique_size = self.trial_params.get("clique_size")
-        if clique_size is None:
-            raise ValueError("clique_size not found in trial_params")
-
-        # Count successful measurements
-        num_valid_cliques = 0
-        total_shots = 0
-
-        for measurement, count in self.counts.items():
-            if measurement == "-1":  # Failed measurement
-                total_shots += count
-                continue
-
-            # Reverse bit order to match graph representation
-            reversed_measurement = measurement[::-1]
-
-            if self._problem_instance.verify_clique(reversed_measurement, clique_size):
-                num_valid_cliques += count
-
-            total_shots += count
-
-        return num_valid_cliques / total_shots if total_shots > 0 else 0.0
+        return successful_shots / total_shots if total_shots > 0 else 0.0
 
 
 # Utility functions for creating problem instances
@@ -653,40 +455,199 @@ def populate_clique_database(
                 )
                 db.save_problem_instance(instance)
 
-def run_clique_benchmark(db: BenchmarkDatabase, compiler: "SynthesisCompiler", backend: Backend, nodes_iter: Iterable[int], edge_probability_iter: Iterable[int], num_problems: int = 20, shots: int = 10**3,):
+
+def _get_clique_trials(problem: CliqueProblem, compiler: "PipelineCompiler", config: PipelineConfig) -> Optional[List[CliqueTrial]]:
+    """
+    returns a list of CliqueTrial instances for the given problem and compiler
+    """
+    trials = []
+    nodes = problem.nodes
+    target_clique_size = max(nodes//2, 2)
+    cliques_of_target_size = problem.clique_counts[target_clique_size]
+    if cliques_of_target_size == 0:
+        # clique of size target_clique_size DNE for this graph
+        return []
+
+    try:
+        compile_result = compiler.compile(problem, clique_size=target_clique_size)
+        if not compile_result.synthesis_circuit:
+            raise Exception("No synthesis circuit returned")
+    except Exception as e:
+        logger.error(f"Compilation failed for problem ID {problem.id} with error: {e}")
+        return None
+    oracle = compile_result.synthesis_circuit
+
+    # verify small oracles as a sanity check (but skip large ones which take too long in simulation)
+    if problem.nodes <= 5 and not verify_oracle(oracle, problem):
+        logger.warning(f"Oracle verification failed for problem ID {problem.id}, skipping trial.")
+        return None
+
+    optimal_grover_iters = calculate_grover_iterations(cliques_of_target_size, 2**nodes)
+    for grover_iters in range(1, optimal_grover_iters):
+
+        circuit = build_grover_circuit(oracle, problem.number_of_input_bits(), grover_iters)
+        circuit_transpiled = compiler.transpile(circuit)
+
+        trial = CliqueTrial(
+            problem=problem,
+            compiler_name=compiler.name,
+            grover_iterations=grover_iters,
+            clique_size=target_clique_size,
+            pipeline_config=config,
+            circuit=circuit_transpiled,
+            circuit_pretranspile=circuit,
+        )
+        trials.append(trial)
+
+    return trials
+
+def _get_clique_oracle_trials(problem: CliqueProblem, compiler: "PipelineCompiler", config: PipelineConfig, num_trials: int = 5) -> Optional[List[CliqueOracleTrial]]:
+    """
+    returns a list of CliqueOracleTrial instances for the given problem and compiler
+    """
+    trials = []
+    nodes = problem.nodes
+    target_clique_size = problem.target_clique_size
+
+    try:
+        compile_result = compiler.compile(problem, clique_size=target_clique_size)
+        if not compile_result.synthesis_circuit:
+            raise Exception("No synthesis circuit returned")
+    except Exception as e:
+        logger.error(f"Compilation failed for problem ID {problem.id} with error: {e}")
+        return None
+    oracle = compile_result.synthesis_circuit
+
+    # verify small oracles as a sanity check (but skip large ones which take too long in simulation)
+    #if problem.nodes <= 5 and not verify_oracle(oracle, problem):
+    #    logger.warning(f"Oracle verification failed for problem ID {problem.id}, skipping trial.")
+    #    return None
+
+    import random
+    for _ in range(num_trials):
+        input_state = ''.join(random.choice(['0', '1']) for _ in range(nodes))
+        qc = qiskit.QuantumCircuit(max(oracle.num_qubits, problem.nodes + 1), problem.nodes + 1)
+        for i, bit in enumerate(input_state):
+            if bit == '1':
+                qc.x(qc.qubits[i])
+
+        qc.compose(oracle, inplace=True)
+        qc.measure(range(problem.nodes + 1), range(problem.nodes + 1))
+
+        transpiled_qc = compiler.transpile(qc)
+        trials.append(CliqueOracleTrial(
+                problem=problem,
+                compiler_name=compiler.name,
+                input_state=input_state,
+                pipeline_config=config,
+                circuit = transpiled_qc,
+                circuit_pretranspile = qc,
+            )
+        )
+
+    return trials
+
+def run_clique_benchmark(db: BenchmarkDatabase, compiler: "PipelineCompiler", backend: Backend, nodes_iter: Iterable[int], num_problems: int = 20, shots: int = 10**3, max_problems_per_job: Optional[int] = None, save_circuits: bool = False):
+    # get compiler pipeline config to save with each trial
+    config = db.get_saved_config(compiler.config)
+
+    assert backend.name == config.backend.name
+
     with BatchQueue(db, backend=backend, shots=shots) as q:
         for nodes in nodes_iter:
-            for prob in edge_probability_iter:
-                for problem in db.find_problem_instances(
-                    nodes=nodes,
-                    edge_probability=prob,
-                    limit=num_problems, 
-                    compiler_name=compiler.name,
-                    choose_untested=True,
-                    random_sample=True
-                ):
-                    target_clique_size = max(nodes//2, 2)
-                    cliques_of_target_size = problem.clique_counts[target_clique_size]
-                    if cliques_of_target_size == 0:
-                        # clique of size target_clique_size DNE for this graph
-                        continue
+                
+            count = db.query(
+                select(func.count(func.distinct(db.problem_class.id)))
+                .select_from(db.problem_class)
+                        .join(db.trial_class, db.trial_class.problem_id == db.problem_class.id)
+                        .where(
+                            db.trial_class.pipeline_config == config,
+                            db.problem_class.nodes == nodes,
+                    )
+                )[0]
+            if count >= num_problems:
+                logger.info(f"Skipping (nodes={nodes}) -- already have {count} instances")
+                continue
 
-                    oracle = compiler.compile(problem, clique_size=target_clique_size)
+            pending_trial_problem_count = 0
 
-                    optimal_grover_iters = calculate_grover_iterations(cliques_of_target_size, 2**nodes)
-                    for grover_iters in range(1, optimal_grover_iters):
+            for problem in db.find_problem_instances(
+                nodes=nodes,
+                limit=num_problems - count, 
+                compiler_name=compiler.name,
+                choose_untested=True,
+                random_sample=True
+            ):
+                logger.info(f"Compiling problem ID {problem.id} with {nodes} nodes.")
+                compiler_run = run_with_resource_limits(
+                    _get_clique_trials if db.trial_class == CliqueTrial else _get_clique_oracle_trials,
+                    kwargs={
+                        "problem": problem,
+                        "compiler": compiler,
+                        "config": config,
+                    },
+                    memory_limit_mb=2024,
+                    timeout_seconds=240
+                )
+                trials = compiler_run.result if compiler_run.success else None
+                if trials is None:
+                    logger.warning(f"Compilation failed for problem ID {problem.id}: {compiler_run.error_message}.")
+                    db.create_compilation_failure(problem, compiler.name)
+                    continue
+                
+                for trial in trials:
+                        qc = trial.circuit_pretranspile
+                        transpiled_qc = trial.circuit
+                        if not save_circuits:
+                            trial.circuit = None
+                            trial.circuit_pretranspile = None
+                        q.enqueue(trial, transpiled_qc, run_simulation=(qc.num_qubits <= 10))
 
-                        circuit = build_grover_circuit(oracle, problem.number_of_input_bits(), grover_iters)
-                        circuit_transpiled = transpile(circuit, backend=backend)
+                pending_trial_problem_count += 1
+                if max_problems_per_job and pending_trial_problem_count >= max_problems_per_job:
+                    q.submit_tasks()
+                    pending_trial_problem_count = 0
 
-                        trial = CliqueTrial(
-                            problem=problem,
-                            compiler_name=compiler.name,
-                            grover_iterations=grover_iters,
-                            clique_size=target_clique_size,
-                            circuit_pretranspile=circuit,
-                            circuit=circuit_transpiled,
-                        )
-                        q.enqueue(trial, circuit_transpiled, run_simulation=(circuit_transpiled.num_qubits <= 12))
+
+def run_clique_benchmark_sample(db: BenchmarkDatabase, compiler: "PipelineCompiler", backend: Backend, problems: Iterable[CliqueProblem], shots: int = 10**3, max_problems_per_job: Optional[int] = None, save_circuits: bool = False):
+    """
+    Alternative version of run_clique_benchmark that takes a list of problems directly instead of finding untested problems with the specified range of nodes (run_clique_benchmark).
+    """
+    # get compiler pipeline config to save with each trial
+    config = db.get_saved_config(compiler.config)
+    assert backend.name == config.backend.name
+
+
+    pending_trial_problem_count = 0
+    with BatchQueue(db, backend=backend, shots=shots) as q:
+        for problem in problems:
+            compiler_run = run_with_resource_limits(
+                _get_clique_trials if db.trial_class == CliqueTrial else _get_clique_oracle_trials,
+                kwargs={
+                    "problem": problem,
+                    "compiler": compiler,
+                    "config": config,
+                },
+                memory_limit_mb=2024,
+                timeout_seconds=240
+            )
+            trials = compiler_run.result if compiler_run.success else None
+            if trials is None:
+                logger.warning(f"Compilation failed for problem ID {problem.id}: {compiler_run.error_message}.")
+                db.create_compilation_failure(problem, compiler.name)
+                continue
+            
+            for trial in trials:
+                    qc = trial.circuit_pretranspile
+                    transpiled_qc = trial.circuit
+                    if not save_circuits:
+                        trial.circuit = None
+                        trial.circuit_pretranspile = None
+                    q.enqueue(trial, transpiled_qc, run_simulation=(qc.num_qubits <= 10))
+
+            pending_trial_problem_count += 1
+            if max_problems_per_job and pending_trial_problem_count >= max_problems_per_job:
+                q.submit_tasks()
+                pending_trial_problem_count = 0
     
 
