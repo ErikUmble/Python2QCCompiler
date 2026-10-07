@@ -19,9 +19,10 @@ class ExperimentProblem(BaseProblem):
     
     # extra_data already included by BaseProblem
 
-    def __init__(self, verifier: Optional[Callable[Tuple[bool], bool]] = None, **kwargs):
+    def __init__(self, verifier: Optional[Callable[Tuple[bool], bool]] = None, verifier_src: Optional[str] = None, **kwargs):
         super().__init__(**kwargs)
         self.verifier = verifier
+        self.verifier_src = verifier_src
 
     def get_verifier(self) -> Callable[[Tuple[bool]], bool]:
         if not self.verifier:
@@ -30,6 +31,9 @@ class ExperimentProblem(BaseProblem):
     
     def get_verifier_src(self) -> str:
         """Get the source code of the verifier function as a string."""
+        if self.verifier_src:
+            return self.verifier_src
+        
         import inspect
 
         if not self.verifier:

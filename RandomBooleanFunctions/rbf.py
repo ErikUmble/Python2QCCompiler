@@ -1,4 +1,6 @@
+import datetime
 import logging
+from time import time
 from typing import Iterable, List, Tuple, Dict, Any, Union, Optional, ClassVar, Type
 import qiskit
 from qiskit.providers import Backend
@@ -89,6 +91,7 @@ class RandomBooleanFunction(BaseProblem):
     num_vars: Mapped[int]
     complexity: Mapped[int]
     statement: Mapped[str] = mapped_column(Text)
+    num_satisfying_inputs: Mapped[int] = mapped_column(Integer, nullable=True)
 
     @declared_attr
     def __table_args__(cls):
@@ -130,6 +133,40 @@ class RandomBooleanFunction(BaseProblem):
     
     def number_of_input_bits(self) -> int:
         return self.num_vars
+    
+    def get_num_satisfying_inputs(self) -> int:
+        if self.num_satisfying_inputs is not None:
+            return self.num_satisfying_inputs
+        
+        try:
+            # optimization: use BDD if possible for more efficient counting of satisfying inputs in general
+            from dd.autoref import BDD
+            bdd = BDD()
+            bdd.declare(*self.vars)
+            # convert statement to use bitwise operators that dd expects
+            s = self.statement.replace("not", "~").replace("or", "|").replace("and","&")
+            u = bdd.add_expr(s)
+            count = bdd.count(u, nvars=self.num_vars)
+            self.num_satisfying_inputs = int(count)
+            return self.num_satisfying_inputs
+        
+        except ImportError:
+            # fallback to naive brute force evaluation (inefficient due to Python eval overhead)
+            pass
+
+        count = 0
+        for i in range(2 ** self.num_vars):
+            input_variables = {}
+            for j, var in enumerate(self.vars):
+                input_variables[var] = (i >> j) & 1
+            if eval(self.statement, {}, input_variables):
+                count += 1
+        
+        self.num_satisfying_inputs = count
+        return count
+    
+    def get_num_solutions(self) -> int:
+        return self.get_num_satisfying_inputs()
 
     def verify_solution(self, inpt: BitVec) -> bool:
         """
@@ -198,6 +235,8 @@ class RandomBooleanFunctionTrial(TrialCircuitMetricsMixin, BaseTrial):
     ProblemClass = RandomBooleanFunction
 
     input_state: Mapped[str] = mapped_column(String(255))  # can make larger as quantum computers scale up
+
+    #backend: Mapped[Optional[str]] = mapped_column(String(32), nullable=True, index=True)  # added because we are not using pipeline config for these trials
 
     # override to disable pipeline config foreign key (as adding this requires a copy, drop, & rename migration)
     pipeline_config_id = None
@@ -304,7 +343,10 @@ def create_compilation_failure(db_manager: BenchmarkDatabase, problem: RandomBoo
 def _run_rbf_benchmark_sample(problem: RandomBooleanFunction, compiler: "SynthesisCompiler", backend: Backend, num_trials: int, save_circuits: bool = False) -> Optional[List[RandomBooleanFunctionTrial]]:
     trials = []
 
+    start_time = datetime.datetime.now()
     oracle = problem.oracle(compiler.name)
+    end_time = datetime.datetime.now()
+    compile_time = (end_time - start_time).total_seconds()
 
     if oracle is None:
         logger.warning(f"Compilation failed for problem {problem.id}: {problem.statement} with compiler {compiler.name}")
@@ -330,6 +372,7 @@ def _run_rbf_benchmark_sample(problem: RandomBooleanFunction, compiler: "Synthes
                 input_state=input_state,
                 circuit = transpiled_qc if save_circuits else None,
                 circuit_pretranspile = qc if save_circuits else None,
+                extra_data={"compile_time": compile_time}
             )
         )
 
@@ -348,26 +391,27 @@ def run_rbf_benchmark(db_manager: BenchmarkDatabase, compiler: "SynthesisCompile
         shots: Number of shots to run per trial
         max_problems_per_job: Maximum number of problems to include in each job submission to the backend (set this to 1 to force trial transpilation and submission to the backend before compiling the next problem)
     """
-    with BatchQueue(db_manager, backend=backend, shots=shots) as q:
-        pending_trial_problem_count = 0
-        for num_vars in num_vars_iter:
-            for complexity in complexity_iter:
-                logger.info(f"Benchmarking functions with num_vars={num_vars}, complexity={complexity}")
-                # check if we already have enough data for this size
-                count = db_manager.query(
-                    select(func.count(func.distinct(db_manager.problem_class.id)))
-                    .select_from(db_manager.problem_class)
-                            .join(db_manager.trial_class, db_manager.trial_class.problem_id == db_manager.problem_class.id)
-                            .where(
-                                db_manager.trial_class.compiler_name == compiler.name,
-                                db_manager.problem_class.num_vars == num_vars,
-                                db_manager.problem_class.complexity == complexity
-                        )
-                    )[0]
-                if count >= num_functions:
-                    logger.info(f"Skipping (num_vars={num_vars}, complexity={complexity}) -- already have {count} instances")
-                    continue
-
+    
+    pending_trial_problem_count = 0
+    for num_vars in num_vars_iter:
+        for complexity in complexity_iter:
+            logger.info(f"Benchmarking functions with num_vars={num_vars}, complexity={complexity}")
+            # check if we already have enough data for this size
+            count = db_manager.query(
+                select(func.count(func.distinct(db_manager.problem_class.id)))
+                .select_from(db_manager.problem_class)
+                        .join(db_manager.trial_class, db_manager.trial_class.problem_id == db_manager.problem_class.id)
+                        .where(
+                            db_manager.trial_class.compiler_name == compiler.name,
+                            #db_manager.trial_class.backend == backend.name,
+                            db_manager.problem_class.num_vars == num_vars,
+                            db_manager.problem_class.complexity == complexity
+                    )
+                )[0]
+            if count >= num_functions:
+                logger.info(f"Skipping (num_vars={num_vars}, complexity={complexity}) -- already have {count} instances")
+                continue
+            with BatchQueue(db_manager, backend=backend, shots=shots) as q:  # TEMP: moved this inside the loop to force smaller batches until we can add batch size feature to the BatchQueue
                 problem_instances = db_manager.find_problem_instances(
                     num_vars=num_vars,
                     complexity=complexity,
@@ -444,4 +488,5 @@ def generate_rbf_problems(db_manager: BenchmarkDatabase, num_vars_iter: Iterable
 
             for statement in statements:
                 problem_instance = RandomBooleanFunction(statement=statement, num_vars=num_vars, complexity=complexity)
+                problem_instance.get_num_satisfying_inputs()  # precompute this to save time later
                 db_manager.save_problem_instance(problem_instance)

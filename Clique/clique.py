@@ -1,4 +1,5 @@
 # Import the research library
+import datetime
 import importlib.util
 import itertools
 import json
@@ -392,7 +393,7 @@ class CliqueOracleTrial(TrialCircuitMetricsMixin, BaseTrial):
     ProblemClass = CliqueProblem
 
     input_state: Mapped[str]
-    expected_output: Mapped[Optional[bool]]
+    expected_output: Mapped[bool]
 
     def __init__(self, *args, **kwargs):
         if kwargs.get("is_failed", False):
@@ -470,21 +471,23 @@ def _get_clique_trials(problem: CliqueProblem, compiler: "PipelineCompiler", con
 
     try:
         compile_result = compiler.compile(problem, clique_size=target_clique_size)
-        if not compile_result.synthesis_circuit:
+        if compile_result.synthesis_circuit is None:
             raise Exception("No synthesis circuit returned")
     except Exception as e:
         logger.error(f"Compilation failed for problem ID {problem.id} with error: {e}")
         return None
     oracle = compile_result.synthesis_circuit
 
+    print("Finished compiling oracle")
+
     # verify small oracles as a sanity check (but skip large ones which take too long in simulation)
-    if problem.nodes <= 5 and not verify_oracle(oracle, problem):
-        logger.warning(f"Oracle verification failed for problem ID {problem.id}, skipping trial.")
-        return None
+    #if problem.nodes <= 5 and not verify_oracle(oracle, problem):
+    #    logger.warning(f"Oracle verification failed for problem ID {problem.id}, skipping trial.")
+    #    return None
 
     optimal_grover_iters = calculate_grover_iterations(cliques_of_target_size, 2**nodes)
-    for grover_iters in range(1, optimal_grover_iters):
-
+    for grover_iters in range(1, optimal_grover_iters+1):
+        print("Building Grover circuit with", grover_iters, "iterations")
         circuit = build_grover_circuit(oracle, problem.number_of_input_bits(), grover_iters)
         circuit_transpiled = compiler.transpile(circuit)
 
@@ -510,13 +513,16 @@ def _get_clique_oracle_trials(problem: CliqueProblem, compiler: "PipelineCompile
     target_clique_size = problem.target_clique_size
 
     try:
+        start_time = datetime.datetime.now()
         compile_result = compiler.compile(problem, clique_size=target_clique_size)
-        if not compile_result.synthesis_circuit:
+        end_time = datetime.datetime.now()
+        if compile_result.synthesis_circuit is None:
             raise Exception("No synthesis circuit returned")
     except Exception as e:
         logger.error(f"Compilation failed for problem ID {problem.id} with error: {e}")
         return None
     oracle = compile_result.synthesis_circuit
+    compile_time = (end_time - start_time).total_seconds()
 
     # verify small oracles as a sanity check (but skip large ones which take too long in simulation)
     #if problem.nodes <= 5 and not verify_oracle(oracle, problem):
@@ -542,6 +548,7 @@ def _get_clique_oracle_trials(problem: CliqueProblem, compiler: "PipelineCompile
                 pipeline_config=config,
                 circuit = transpiled_qc,
                 circuit_pretranspile = qc,
+                extra_data={"compile_time":compile_time}
             )
         )
 

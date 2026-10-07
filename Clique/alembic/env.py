@@ -8,6 +8,12 @@ from alembic import context
 from benchmarklib import Base
 from clique import CliqueProblem, CliqueTrial
 
+def include_object(object, name, type_, reflected, compare_to):
+    tables = ["clique_problems", "clique_trials", "clique_oracle_trials"]
+    if type_ == "table" and name not in tables:
+        return False
+    return True
+
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config

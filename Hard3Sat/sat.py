@@ -125,6 +125,9 @@ class ThreeSat(BaseProblem):
     
     def number_of_input_bits(self) -> int:
         return self.num_vars
+
+    def get_num_solutions(self) -> int:
+        return len(self.solutions)
     
     def get_verifier_src(self) -> str:
         src = "def verify(inpt: Tuple[bool]) -> bool:\n"
@@ -141,13 +144,13 @@ class ThreeSat(BaseProblem):
 class ThreeSatTrial(TrialCircuitMetricsMixin, BaseTrial):
     __tablename__ = 'three_sat_trials'
     ProblemClass = ThreeSat
-    grover_iters: Mapped[Optional[int]]
+    grover_iterations: Mapped[Optional[int]]
 
     def calculate_expected_success_rate(
         self,
        db_manager: Optional[BenchmarkDatabase] = None,
     ) -> float:
-        grover_iters = self.grover_iters
+        grover_iters = self.grover_iterations
         if grover_iters is None:
             grover_iters = 1
             print("Warning: grover_iters not found in trial -- defaulting to 1")
@@ -163,6 +166,8 @@ class ThreeSatTrial(TrialCircuitMetricsMixin, BaseTrial):
         self,
         db_manager: Optional[BenchmarkDatabase] = None,
     ) -> float:
+        if self.is_failed:
+            return 0.0
         # count the number of successful measurements in the counts dict
         if self.counts is None:
             return ValueError("counts is empty -- cannot compute the success rate of this trial")
@@ -275,19 +280,51 @@ def generate_planted_3sat(num_vars, num_clauses, seed: int) -> ThreeSat:
     # Build ThreeSat
     return ThreeSat(expr=formula.clauses, num_vars=num_vars, solutions=solutions, seed=seed)
 
+def generate_random_3sat(num_vars, num_clauses, seed: int) -> ThreeSat:
+    rng_instance = random.Random(seed)
+    
+    formula = CNF()
+    current_clauses = 0
+
+    # Generate random clauses
+    while current_clauses < num_clauses:
+        variables_in_clause = rng_instance.sample(range(1, num_vars + 1), 3)
+        clause = []
+        for var in variables_in_clause:
+            literal = var if rng_instance.random() < 0.5 else -var
+            clause.append(literal)
+        formula.append(clause)
+        current_clauses += 1
+
+    with Glucose(bootstrap_with=formula) as solver: 
+        solutions = [model for model in solver.enum_models()]
+
+    return ThreeSat(expr=formula.clauses, num_vars=num_vars, solutions=solutions, seed=seed)
+
 def populate_problems(db: BenchmarkDatabase, var_range: Iterator[int] = range(3, 13), num_problems: int = 100):
     seed = 0
     rng = random.Random(seed)
     for num_vars in var_range:
-        # critical_clauses = int(4.26 * num_vars) for random 3 sat (but we are doing planted)
-        low = int(3 * num_vars)
-        high = int(6 * num_vars)
+        # planted 3 sat uses a range of clause ratio
+        low_planted = int(3 * num_vars)
+        high_planted = int(6 * num_vars)
         count = db.query(select(func.count(ThreeSat.id)).where(ThreeSat.num_vars == num_vars,))[0]
+        seed += count
         if count >= num_problems:
             continue
-        for i in range(num_problems - count):
-            num_clauses = rng.randint(low, high)
+        # half planted
+        for i in range((num_problems - count)//2):
+            num_clauses = rng.randint(low_planted, high_planted)
             problem_instance = generate_planted_3sat(num_vars, num_clauses, seed)
+            db.save_problem_instance(problem_instance)
+            seed += 1
+
+        # remaining half random
+        count = db.query(select(func.count(ThreeSat.id)).where(ThreeSat.num_vars == num_vars,))[0]
+        # critical_clauses = int(4.26 * num_vars) for random 3 sat
+        num_clauses = int(4.26 * num_vars)
+        for i in range(num_problems - count):
+            problem_instance = generate_random_3sat(num_vars, num_clauses, seed)
             db.save_problem_instance(problem_instance)
             seed += 1
 
@@ -301,7 +338,7 @@ def _get_three_sat_trials(problem: ThreeSat, compiler: "PipelineCompiler", confi
 
     try:
         compile_result = compiler.compile(problem)
-        if not compile_result.synthesis_circuit:
+        if compile_result.synthesis_circuit is None:
             raise Exception("No synthesis circuit returned")
     except Exception as e:
         logger.error(f"Compilation failed for problem ID {problem.id} with error: {e}")
@@ -314,7 +351,7 @@ def _get_three_sat_trials(problem: ThreeSat, compiler: "PipelineCompiler", confi
     #    return None
 
     optimal_grover_iters = calculate_grover_iterations(len(problem.solutions), 2**num_vars)
-    for grover_iters in range(1, optimal_grover_iters):
+    for grover_iters in range(1, optimal_grover_iters+1):
 
         circuit = build_grover_circuit(oracle, problem.number_of_input_bits(), grover_iters)
         circuit_transpiled = compiler.transpile(circuit)
@@ -340,7 +377,7 @@ def _get_three_sat_oracle_trials(problem: ThreeSat, compiler: "PipelineCompiler"
 
     try:
         compile_result = compiler.compile(problem)
-        if not compile_result.synthesis_circuit:
+        if compile_result.synthesis_circuit is None:
             raise Exception("No synthesis circuit returned")
     except Exception as e:
         logger.error(f"Compilation failed for problem ID {problem.id} with error: {e}")
@@ -375,6 +412,33 @@ def _get_three_sat_oracle_trials(problem: ThreeSat, compiler: "PipelineCompiler"
         )
 
     return trials
+
+def create_compilation_failure(db: BenchmarkDatabase, problem: ThreeSat, compiler: "PipelineConfig"):
+    if db.trial_class == ThreeSatTrial:
+        trial = ThreeSatTrial(
+            problem=problem,
+            compiler_name=compiler.name,
+            grover_iterations=None,
+            pipeline_config=compiler.config,
+            circuit=None,
+            circuit_pretranspile=None,
+            is_failed=True,
+        )
+    elif db.trial_class == ThreeSatOracleTrial:
+        trial = ThreeSatOracleTrial(
+            problem=problem,
+            compiler_name=compiler.name,
+            input_state="-1",
+            expected_output=None,
+            pipeline_config=compiler.config,
+            circuit=None,
+            circuit_pretranspile=None,
+            is_failed=True,
+        )
+    else:
+        raise ValueError(f"Unknown trial class {db.trial_class} for creating compilation failure")
+    
+    db.save_trial(trial)
 
 def run_three_sat_benchmark(db: BenchmarkDatabase, compiler: "PipelineCompiler", backend: Backend, num_vars_iter: Iterable[int], num_problems: int = 20, shots: int = 10**3, max_problems_per_job: Optional[int] = None, save_circuits: bool = False):
     # get compiler pipeline config to save with each trial
@@ -421,7 +485,9 @@ def run_three_sat_benchmark(db: BenchmarkDatabase, compiler: "PipelineCompiler",
                 trials = compiler_run.result if compiler_run.success else None
                 if trials is None:
                     logger.warning(f"Compilation failed for problem ID {problem.id}: {compiler_run.error_message}.")
-                    db.create_compilation_failure(problem, compiler.name)
+                    #create_compilation_failure(db, problem, compiler)
+                    with open("compilation_failures.log", "a") as f:
+                        f.write(f"{problem.id},{compiler.name}\n")
                     continue
                 
                 for trial in trials:
@@ -436,3 +502,46 @@ def run_three_sat_benchmark(db: BenchmarkDatabase, compiler: "PipelineCompiler",
                 if max_problems_per_job and pending_trial_problem_count >= max_problems_per_job:
                     q.submit_tasks()
                     pending_trial_problem_count = 0
+
+def run_three_sat_benchmark_sample(db: BenchmarkDatabase, compiler: "PipelineCompiler", backend: Backend, problems: Iterable[ThreeSat], shots: int = 10**3, max_problems_per_job: Optional[int] = None, save_circuits: bool = False):
+    """
+    Alternative version of run_three_sat_benchmark that takes a list of problems directly instead of finding untested problems with the specified range of variable count (run_three_sat_benchmark).
+    """
+    # get compiler pipeline config to save with each trial
+    config = db.get_saved_config(compiler.config)
+
+    assert backend.name == config.backend.name
+
+    pending_trial_problem_count = 0
+    with BatchQueue(db, backend=backend, shots=shots) as q:
+        for problem in problems:
+            compiler_run = run_with_resource_limits(
+                _get_three_sat_trials if db.trial_class == ThreeSatTrial else _get_three_sat_oracle_trials,
+                kwargs={
+                    "problem": problem,
+                    "compiler": compiler,
+                    "config": config,
+                },
+                memory_limit_mb=2024,
+                timeout_seconds=240,
+            )
+            trials = compiler_run.result if compiler_run.success else None
+            if trials is None:
+                logger.warning(f"Compilation failed for problem ID {problem.id}: {compiler_run.error_message}.")
+                #create_compilation_failure(db, problem, compiler)
+                with open("compilation_failures.log", "a") as f:
+                        f.write(f"{problem.id},{compiler.name}\n")
+                continue
+
+            for trial in trials:
+                qc = trial.circuit_pretranspile
+                transpiled_qc = trial.circuit
+                if not save_circuits:
+                    trial.circuit = None
+                    trial.circuit_pretranspile = None
+                q.enqueue(trial, transpiled_qc, run_simulation=(qc.num_qubits <= 10))
+
+            pending_trial_problem_count += 1
+            if max_problems_per_job and pending_trial_problem_count >= max_problems_per_job:
+                q.submit_tasks()
+                pending_trial_problem_count = 0
